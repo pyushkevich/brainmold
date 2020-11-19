@@ -372,7 +372,6 @@ public:
 
     // Compute connected components in the input dataset
     m_WholeComp = count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
-    cout << " COMP = " << m_WholeComp << endl;
   }
 
   /** Set up optimization for specific number of cut planes */
@@ -915,8 +914,8 @@ protected:
 void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_raw, ImageType *i_hemi_mask)
 {
   // C3D output should be piped to a log file
-  string fn_c3d_log = get_output_filename(param, SLAB_C3D_LOG, slab_id);
-  ofstream c3d_log(fn_c3d_log.c_str());
+  ofstream c3d_log(get_output_filename(param, SLAB_C3D_LOG, slab_id).c_str());
+  ofstream o_json(get_output_filename(param, SLAB_CUTPLANE_JSON, slab_id));
 
   // Create our own API
   ConvertAPIType api;
@@ -1000,6 +999,14 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
     printf("Optimization completed in %f seconds\n", (t2 - t1) / CLOCKS_PER_SEC);
     }
 
+  // If there is no cuts, return
+  if(cpl.size() == 0)
+    {
+    cout << "  No cutting needed for this slab." << endl;
+    o_json << "[" << endl << "]" << endl;
+    return;
+    }
+
   // Generate a mold for this slab
   cout << "  Generating mold" << endl;
 
@@ -1016,10 +1023,11 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
     }
 
   // Combine the cut planes into one image
-  api.Execute("-accum -min -endaccum -as cuts");
+  if(cpl.size() > 1)
+    api.Execute("-accum -min -endaccum");
 
   // Figure out where the base starts: 5vox from the bottom or top.
-  api.Execute("-push y -thresh %f inf 4 -4 -max -as cutsbase ", slab.y1);
+  api.Execute(" -as cuts -push y -thresh %f inf 4 -4 -max -as cutsbase ", slab.y1);
 
   // Apply extrusion to the slab itself
   int dilation = (int) ceil(param.mold_wall_thickness_mm / param.mold_resolution_mm);
@@ -1045,13 +1053,15 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
           cos(cp.second), sin(cp.second), -cp.first, 1 << i);
     }
 
-  api.Execute("-accum -add -endaccum -shift 1 -popas part "
+  if(cpl.size() > 1)
+    api.Execute("-accum -add -endaccum");
+
+  api.Execute("-shift 1 -popas part "
               "-push slab_raw -dup -push part -int 0 -reslice-identity -times "
               "-type uchar -as slabvol -o %s",
               get_output_filename(param, SLAB_VOLUME_IMAGE, slab_id).c_str());
 
   // Generate a JSON file with cutplane information
-  ofstream o_json(get_output_filename(param, SLAB_CUTPLANE_JSON, slab_id));
   o_json << "[" << endl;
   for(int i = 0; i < cpl.size(); i++)
     {
