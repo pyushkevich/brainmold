@@ -2,6 +2,7 @@
 #include <string>
 #include <cstdio>
 #include <cmath>
+#include <queue>
 
 #include <itkImage.h>
 #include <itkImageFileReader.h>
@@ -168,6 +169,24 @@ typedef std::pair<double, double> CutPlane;
 typedef std::vector<CutPlane> CutPlaneList;
 
 
+/** Get a label at a coordinate based on cut planes (first label is 1) */
+int get_block_label(double x, double y, const CutPlaneList &cpl)
+{
+  int label = 1;
+  for(unsigned int k=0; k < cpl.size(); k++)
+    {
+    int label_k = 1 << k;
+    double cos_theta = cos(cpl[k].second);
+    double sin_theta = sin(cpl[k].second);
+    double r = cpl[k].first;
+
+    double d = x * cos_theta + y * sin_theta;
+    label += (d < r) ? label_k : 0;
+    }
+
+  return label;
+}
+
 
 /*
  1  procedure BFS(G, root) is
@@ -185,7 +204,7 @@ typedef std::vector<CutPlane> CutPlaneList;
 */
 
 
-#include <queue>
+
 int count_connected_components_bfs(
     AbstractImmutableSparseArray *graph,
     int *vertex_label, int *vertex_comp)
@@ -225,27 +244,24 @@ int count_connected_components_bfs(
 }
 
 
-class SlabCutPlaneBruteOptimization
+class VoxelGraph
 {
 public:
   typedef ImmutableSparseMatrix<double> SparseMatrixType;
 
-  /** Initialize graph data structures for an input slab */
-  SlabCutPlaneBruteOptimization(ImageType *slab, ImageType *dots)
+  // Set up the graph
+  VoxelGraph(ImageType *img)
   {
-    // Output goes to std::out
-    m_SOut = &std::cout;
-
     // On the first pass, label the image with vertex indices and set coord arrays
     typedef itk::Image<int, 3> LabelImage;
     typename LabelImage::Pointer imgLabel = LabelImage::New();
-    imgLabel->CopyInformation(slab);
-    imgLabel->SetRegions(slab->GetBufferedRegion());
+    imgLabel->CopyInformation(img);
+    imgLabel->SetRegions(img->GetBufferedRegion());
     imgLabel->Allocate();
     imgLabel->FillBuffer(-1);
 
-    auto region = slab->GetBufferedRegion();
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc(slab, region);
+    auto region = img->GetBufferedRegion();
+    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc(img, region);
     itk::ImageRegionIterator<LabelImage> itDest(imgLabel, region);
     unsigned int n = 0;
     for( ; !itSrc.IsAtEnd(); ++itSrc, ++itDest)
@@ -256,7 +272,7 @@ public:
 
     // Second pass, generate coordinate arrays
     m_X.set_size(n, 3);
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc2(slab, region);
+    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc2(img, region);
     int k = 0;
     for(; !itSrc2.IsAtEnd(); ++itSrc2)
       {
@@ -265,7 +281,7 @@ public:
         // Map index to RAS coordinate
         auto idx = itSrc2.GetIndex();
         itk::Point<double, 3> pt;
-        slab->TransformIndexToPhysicalPoint(idx, pt);
+        img->TransformIndexToPhysicalPoint(idx, pt);
         pt[0] *= -1.0; pt[1] *= -1.0;
 
         // Set coordinate array
@@ -320,8 +336,91 @@ public:
     m_NodeLabel.fill(0);
     m_CompIndex.set_size(n);
 
-    // Compute connected components in the input dataset
+    // Compute number of connected components
     m_WholeComp = count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
+  }
+
+  // Apply a set of cut planes to the image
+  void ApplyCutPlanes(CutPlaneList &cpl)
+  {
+    // Apply each plane to every vertex
+    m_NodeLabel.fill(0);
+    for(unsigned int k = 0; k < cpl.size(); k++)
+      {
+      int label_k = 1 << k;
+      double cos_theta = cos(cpl[k].second);
+      double sin_theta = sin(cpl[k].second);
+      double r = cpl[k].first;
+
+      for(unsigned int i = 0; i < m_X.rows(); i++)
+        {
+        double d = m_X[i][0] * cos_theta + m_X[i][2] * sin_theta;
+        m_NodeLabel[i] += (d < r) ? label_k : 0;
+        }
+      }
+  }
+
+  // Compute block extents and sizes with respect to given orientation
+  void ComputeBlockExtentsAndSizes(int n_planes, double phi)
+  {
+    // Compute extents and sizes
+    unsigned int nr = 1 << n_planes;
+    double cos_phi = cos(phi), sin_phi = sin(phi);
+    m_BlockExtents.set_size(nr, 4); m_BlockExtents.fill(0.0);
+    m_BlockSizes.set_size(nr); m_BlockSizes.fill(0.0);
+    for(unsigned int i = 0; i < m_X.rows(); i++)
+      {
+      int l = m_NodeLabel[i];
+      double u = m_X[i][0] * cos_phi + m_X[i][2] * sin_phi;
+      double v = -m_X[i][0] * sin_phi + m_X[i][2] * cos_phi;
+      if(m_BlockSizes[l] == 0 || u < m_BlockExtents(l, 0)) m_BlockExtents(l, 0) = u;
+      if(m_BlockSizes[l] == 0 || u > m_BlockExtents(l, 1)) m_BlockExtents(l, 1) = u;
+      if(m_BlockSizes[l] == 0 || v < m_BlockExtents(l, 2)) m_BlockExtents(l, 2) = v;
+      if(m_BlockSizes[l] == 0 || v > m_BlockExtents(l, 3)) m_BlockExtents(l, 3) = v;
+      m_BlockSizes[l]++;
+      }
+
+    // Normalize the volumes
+    m_BlockRelativeSizes = m_BlockSizes * (1.0 / m_BlockSizes.sum());
+  }
+
+  // Get the number of components
+  int CountComponents()
+  {
+    return count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
+  }
+
+
+  // Sparse matrix representation of non-zero voxels
+  SparseMatrixType m_S;
+
+  // Matrix of xyz coordinates of the foreground voxels in the mask
+  vnl_matrix<double> m_X, m_DotsX, m_BlockExtents;
+  vnl_vector<double> m_BlockSizes;
+  vnl_vector<double> m_BlockRelativeSizes;
+
+  // Center of mass
+  vnl_vector_fixed<double, 3> m_XMin, m_XMax, m_XDim, m_XCtr;
+
+  // Node labels and connected component labels
+  vnl_vector<int> m_NodeLabel, m_CompIndex;
+
+  // Number of components
+  int m_WholeComp;
+};
+
+
+class SlabCutPlaneBruteOptimization
+{
+public:
+  typedef ImmutableSparseMatrix<double> SparseMatrixType;
+
+  /** Initialize graph data structures for an input slab */
+  SlabCutPlaneBruteOptimization(ImageType *slab_full, ImageType *slab_eroded, ImageType *dots)
+    : m_VGFull(slab_full), m_VGEroded(slab_eroded)
+  {
+    // Output goes to std::out
+    m_SOut = &std::cout;
 
     // Traverse the dots image and record all the locations that must be avoided
     auto reg_dots = dots->GetBufferedRegion();
@@ -359,8 +458,8 @@ public:
   void SetupOptimization(int extra_cuts_w, int extra_cuts_h)
   {
     // Figure out the minimum number of cuts (based on slide dimensions)
-    m_NumCutsW = (int) (m_XDim[0] / 70);
-    m_NumCutsH = (int) (m_XDim[2] / 45);
+    m_NumCutsW = (int) (m_VGFull.m_XDim[0] / 70);
+    m_NumCutsH = (int) (m_VGFull.m_XDim[2] / 45);
 
     // Number of cuts
     m_NumCutsW += extra_cuts_w;
@@ -388,7 +487,7 @@ public:
     for(unsigned int i = 0; i < m_NumCutsW; i++)
       {
       // Adjusting the R for the origin
-      double r_i = x[i+1] + cos(theta) * m_XCtr[0] + cos(theta) * m_XCtr[2];
+      double r_i = x[i+1] + cos(theta) * m_VGFull.m_XCtr[0] + cos(theta) * m_VGFull.m_XCtr[2];
       double theta_i = theta;
       cpl.push_back(std::make_pair(r_i, theta_i));
       }
@@ -397,7 +496,7 @@ public:
     for(unsigned int i = m_NumCutsW; i < m_NumCutsH+m_NumCutsW; i++)
       {
       // Adjusting the R for the origin
-      double r_i = x[i+1] - sin(theta) * m_XCtr[0] + cos(theta) * m_XCtr[2];
+      double r_i = x[i+1] - sin(theta) * m_VGFull.m_XCtr[0] + cos(theta) * m_VGFull.m_XCtr[2];
       double theta_i = M_PI_2 + theta;
       cpl.push_back(std::make_pair(r_i, theta_i));
       }
@@ -418,23 +517,19 @@ public:
     *m_SOut << "==== ITERATION " << setw(3) << ++m_Iter << " ====" << endl;
     *m_SOut << "  Parameters: " << vnl_vector<double>(x, m_NumUnknowns) << endl;
 
+    // Apply cuts to the two graphs
+    m_VGFull.ApplyCutPlanes(cpl);
+    m_VGEroded.ApplyCutPlanes(cpl);
+
     // Keep track of minimum dots distance
     double min_dots_distance = 1.0e100;
 
     // Apply each plane to every vertex
-    m_NodeLabel.fill(0);
     for(unsigned int k = 0; k < cpl.size(); k++)
       {
-      int label_k = 1 << k;
       double cos_theta = cos(cpl[k].second);
       double sin_theta = sin(cpl[k].second);
       double r = cpl[k].first;
-
-      for(unsigned int i = 0; i < m_X.rows(); i++)
-        {
-        double d = m_X[i][0] * cos_theta + m_X[i][2] * sin_theta;
-        m_NodeLabel[i] += (d < r) ? label_k : 0;
-        }
 
       for(unsigned int q = 0; q < m_DotsX.rows(); q++)
         {
@@ -445,56 +540,43 @@ public:
       }
 
     // Now compute statistics for each cut (extents, volume, etc);
-    unsigned int nr = 1 << cpl.size();
-    vnl_matrix<double> extents(nr, 4, 0);
-    vnl_vector<double> volumes(nr, 0.);
-    for(unsigned int i = 0; i < m_X.rows(); i++)
-      {
-      int l = m_NodeLabel[i];
-      double u = m_X[i][0] * cos_phi + m_X[i][2] * sin_phi;
-      double v = -m_X[i][0] * sin_phi + m_X[i][2] * cos_phi;
-      if(volumes[l] == 0 || u < extents(l, 0)) extents(l, 0) = u;
-      if(volumes[l] == 0 || u > extents(l, 1)) extents(l, 1) = u;
-      if(volumes[l] == 0 || v < extents(l, 2)) extents(l, 2) = v;
-      if(volumes[l] == 0 || v > extents(l, 3)) extents(l, 3) = v;
-      volumes[l]++;
-      }
-
-    // Normalize the volumes
-    volumes *= 1.0 / volumes.sum();
+    m_VGFull.ComputeBlockExtentsAndSizes(cpl.size(), phi);
 
     // Compute penalty terms
     double penalty_extent = 0;
     double sum_vol = 0, ssq_vol = 0;
     int n_vol = 0;
-    for(unsigned int l = 0; l < nr; l++)
+    for(unsigned int l = 0; l < m_VGFull.m_BlockExtents.rows(); l++)
       {
-      if(volumes[l] > 0)
+      if(m_VGFull.m_BlockRelativeSizes[l] > 0)
         {
-        double w = extents(l,1) - extents(l,0);
-        double h = extents(l,3) - extents(l,2);
+        double w = m_VGFull.m_BlockExtents(l,1) - m_VGFull.m_BlockExtents(l,0);
+        double h = m_VGFull.m_BlockExtents(l,3) - m_VGFull.m_BlockExtents(l,2);
         double ext_min = min(w, h), ext_max = max(w, h);
 
         char buffer[256];
-        sprintf(buffer, "  Piece %d:  Extent: %4.2f by %4.2f  Volume = %6.4f", l, ext_max, ext_min, volumes[l]);
+        sprintf(buffer, "  Piece %d:  Extent: %4.2f by %4.2f  Rel.Size = %6.4f",
+                l, ext_max, ext_min, m_VGFull.m_BlockRelativeSizes[l]);
         *m_SOut << buffer<< endl;
 
         if(ext_max > 74.)
           penalty_extent += 100000 * (ext_max - 74.);
         if(ext_min > 49.)
           penalty_extent += 100000 * (ext_min - 49.);
-        sum_vol += volumes[l];
-        ssq_vol += volumes[l] * volumes[l];
+        sum_vol += m_VGFull.m_BlockRelativeSizes[l];
+        ssq_vol += m_VGFull.m_BlockRelativeSizes[l] * m_VGFull.m_BlockRelativeSizes[l];
         n_vol++;
         }
       }
     *m_SOut << "  Extent violation penalty: " << penalty_extent << endl;
 
     // Compute number of connected components
-    int n_comp = count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
-    double penalty_conn = n_comp * 1.0;
+    int n_comp_full = m_VGFull.CountComponents();
+    int n_comp_eroded = m_VGEroded.CountComponents();
+    double penalty_conn = n_comp_full * 1.0 + n_comp_eroded * 1.0;
 
-    *m_SOut << "  Connected components in graph: " << n_comp << endl;
+    *m_SOut << "  Connected components in full graph: " << n_comp_full << endl;
+    *m_SOut << "  Connected components in eroded graph: " << n_comp_eroded << endl;
     *m_SOut << "  Connected components penalty: " << penalty_conn << endl;
 
     // Compute the minimum distance from dots to cut planes
@@ -550,12 +632,12 @@ public:
     // Equally space out in width and height
     for(int i = 0; i < m_NumCutsW; i++)
       {
-      ip[i+1] = (i+1) * m_XDim[0] / (m_NumCutsW+1.) - m_XDim[0] / 2.0;
+      ip[i+1] = (i+1) * m_VGFull.m_XDim[0] / (m_NumCutsW+1.) - m_VGFull.m_XDim[0] / 2.0;
       }
 
     for(int i = 0; i < m_NumCutsH; i++)
       {
-      ip[i+m_NumCutsW+1] = (i+1) * m_XDim[2] / (m_NumCutsH+1.) - m_XDim[2] / 2.0;
+      ip[i+m_NumCutsW+1] = (i+1) * m_VGFull.m_XDim[2] / (m_NumCutsH+1.) - m_VGFull.m_XDim[2] / 2.0;
       }
 
     return ip;
@@ -563,23 +645,18 @@ public:
 
   void RedirectOutput(std::ostream &sout) { m_SOut = &sout; }
 
-  int GetNumberOfComponentsInSlab() const { return m_WholeComp; }
+  int GetNumberOfComponentsInSlab() const { return m_VGFull.m_WholeComp; }
 
 private:
-  // Sparse matrix representation of non-zero voxels
-  SparseMatrixType m_S;
+
+  // Voxel graphs for the full image and eroded image
+  VoxelGraph m_VGFull, m_VGEroded;
 
   // Matrix of xyz coordinates of the foreground voxels in the mask
-  vnl_matrix<double> m_X, m_DotsX;
-
-  // Center of mass
-  vnl_vector_fixed<double, 3> m_XMin, m_XMax, m_XDim, m_XCtr;
-
-  // Node labels and connected component labels
-  vnl_vector<int> m_NodeLabel, m_CompIndex;
+  vnl_matrix<double> m_DotsX;
 
   // Number of cuts for current optimization setup
-  int m_NumCutsW, m_NumCutsH, m_NumUnknowns, m_Iter, m_WholeComp;
+  int m_NumCutsW, m_NumCutsH, m_NumUnknowns, m_Iter;
 
   // Output stream
   std::ostream *m_SOut;
@@ -587,14 +664,70 @@ private:
 
 // A nice palette generated by https://mokole.com/palette.html
 int palette[] = {
-  0xa9a9a9, 0xdcdcdc, 0x2f4f4f, 0x556b2f, 0x6b8e23, 0xa0522d, 0x228b22, 0x7f0000,
-  0x191970, 0x708090, 0x483d8b, 0x5f9ea0, 0x3cb371, 0xbc8f8f, 0x663399, 0xbdb76b,
-  0xcd853f, 0x4682b4, 0x000080, 0xd2691e, 0x9acd32, 0xcd5c5c, 0x32cd32, 0xdaa520,
-  0x7f007f, 0x8fbc8f, 0xb03060, 0xd2b48c, 0x66cdaa, 0xff0000, 0x00ced1, 0xffa500,
-  0xffd700, 0xc71585, 0x0000cd, 0x7cfc00, 0x00ff00, 0xba55d3, 0x8a2be2, 0x00ff7f,
-  0x4169e1, 0xe9967a, 0xdc143c, 0x00ffff, 0x00bfff, 0x9370db, 0x0000ff, 0xff6347,
-  0xd8bfd8, 0xff00ff, 0xdb7093, 0xf0e68c, 0xffff54, 0x6495ed, 0xdda0dd, 0x87ceeb,
-  0xff1493, 0xafeeee, 0xee82ee, 0x98fb98, 0x7fffd4, 0xff69b4, 0xffe4c4, 0xffb6c1
+  0x66cdaa, // mediumaquamarine
+  0xda70d6, // orchid
+  0xffd700, // gold
+  0x4169e1, // royalblue
+  0x2f4f4f, // darkslategray
+  0x556b2f, // darkolivegreen
+  0x8b4513, // saddlebrown
+  0x191970, // midnightblue
+  0x708090, // slategray
+  0x8b0000, // darkred
+  0x808000, // olive
+  0x483d8b, // darkslateblue
+  0x5f9ea0, // cadetblue
+  0x008000, // green
+  0x3cb371, // mediumseagreen
+  0xbc8f8f, // rosybrown
+  0x663399, // rebeccapurple
+  0xb8860b, // darkgoldenrod
+  0xbdb76b, // darkkhaki
+  0xcd853f, // peru
+  0x4682b4, // steelblue
+  0x000080, // navy
+  0xd2691e, // chocolate
+  0x9acd32, // yellowgreen
+  0x20b2aa, // lightseagreen
+  0xcd5c5c, // indianred
+  0x32cd32, // limegreen
+  0x7f007f, // purple2
+  0x8fbc8f, // darkseagreen
+  0xb03060, // maroon3
+  0xd2b48c, // tan
+  0x9932cc, // darkorchid
+  0xff0000, // red
+  0xffa500, // orange
+  0xffff00, // yellow
+  0xc71585, // mediumvioletred
+  0x0000cd, // mediumblue
+  0x7cfc00, // lawngreen
+  0x00ff00, // lime
+  0x00fa9a, // mediumspringgreen
+  0xe9967a, // darksalmon
+  0xdc143c, // crimson
+  0x00ffff, // aqua
+  0x00bfff, // deepskyblue
+  0x9370db, // mediumpurple
+  0x0000ff, // blue
+  0xa020f0, // purple3
+  0xff6347, // tomato
+  0xd8bfd8, // thistle
+  0xff00ff, // fuchsia
+  0x1e90ff, // dodgerblue
+  0xdb7093, // palevioletred
+  0xf0e68c, // khaki
+  0xdda0dd, // plum
+  0x87ceeb, // skyblue
+  0xff1493, // deeppink
+  0xafeeee, // paleturquoise
+  0xfaf0e6, // linen
+  0x98fb98, // palegreen
+  0x7fffd4, // aquamarine
+  0xff69b4, // hotpink
+  0xfffacd, // lemonchiffon
+  0xffb6c1, // lightpink
+  0xa9a9a9 // darkgray
 };
 
 struct LabelStats {
@@ -706,7 +839,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
   ofstream opt_log(fn_opt_log.c_str());
 
   // Set up the optimizer
-  SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab_trim"), api.GetImage("dots_slab"));
+  SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab"), api.GetImage("slab_trim"), api.GetImage("dots_slab"));
   if(scp_opt.GetNumberOfComponentsInSlab() == 0)
     {
     cout << "  No components in slab, skipping mold generation" << endl;
@@ -773,7 +906,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
     auto &cp = cpl[i];
     api.Execute(
           "-push x -scale %f -push z -scale %f -add -shift %f "
-          "-thresh 0 inf %d 0 ",
+          "-thresh -inf 0 %d 0 ",
           cos(cp.second), sin(cp.second), -cp.first, 1 << i);
     }
 
@@ -817,13 +950,25 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
     oss << "-replace ";
     for(unsigned int i = 0; i < 64; i++)
       {
-      int val = (palette[i] >> (2-c)) & 0xff;
+      int val = (palette[i] >> (2-c) * 8) & 0xff;
       oss << (i+1) << " " << val << " ";
       }
     api.Execute("-push png_slice %s", oss.str().c_str());
     }
   string fn_png = get_output_filename(param, SLAB_CUT_PNG, slab_id);
   api.Execute("-type uchar -foreach -flip y -endfor -omc %s", fn_png.c_str());
+
+  // Get statistics on the blocks
+  auto stat_vol = get_label_stats(api.GetImage("slabvol"));
+
+  // Get statistics on the dots. For each dot
+  auto stat_dots = get_label_stats(api.GetImage("dots_slab"));
+  for(auto it : stat_dots)
+    {
+    auto &ctr = it.second.center_of_mass;
+    int label = get_block_label(ctr[0], ctr[2], cpl);
+    cout << "Dot " << it.first << " Center " << ctr << " Label " << label << endl;
+    }
 
   // Generate the tex file
   ImagePointer slice = api.GetImage("png_slice");
@@ -845,21 +990,33 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
           ext_x, ext_y, itksys::SystemTools::GetFilenameWithoutExtension(fn_png).c_str());
 
   // Insert a table with available labels
-  auto stat_vol = get_label_stats(api.GetImage("slabvol"));
-  fprintf(ftex, "  \\begin{tabular}{");
-  for(int k = 0; k < stat_vol.size(); k++)
-    fprintf(ftex, "|c");
-  fprintf(ftex,"|}\n    \\hline\n");
-  int k = 0;
+  fprintf(ftex, "  \\begin{tabular}{|c|p{3in}}\n");
+  fprintf(ftex, "    \\hline\n");
   for(auto it : stat_vol)
     {
-    fprintf(ftex, "    \\cellcolor[rgb]{%f,%f,%f}\\textbf{Block %02d-%d} %s \n",
-            ((palette[it.first-1] >> 2) & 0xff) / 255.0,
-            ((palette[it.first-1] >> 1) & 0xff) / 255.0,
+    // Print the label
+    fprintf(ftex, "    \\cellcolor[rgb]{%f,%f,%f}\\textbf{Block %02d-%d} & \n",
+            ((palette[it.first-1] >> 16) & 0xff) / 255.0,
+            ((palette[it.first-1] >> 8) & 0xff) / 255.0,
             ((palette[it.first-1] >> 0) & 0xff) / 255.0,
-            slab_id, it.first, (++k) == stat_vol.size() ? "\\\\" : "&");
+            slab_id, it.first);
+
+    // Report the dots
+    for(auto itd : stat_dots)
+      {
+      auto &ctr = itd.second.center_of_mass;
+      int label = get_block_label(ctr[0], ctr[2], cpl);
+      if(label == it.first)
+        {
+        fprintf(ftex, "    \\small Dot %d at depth $%4.2f$mm of $%4.2f$mm \\newline \n",
+                itd.first, ctr[1] - slab.y0, slab.y1 - slab.y0);
+        }
+      }
+
+    // End the table entry
+    fprintf(ftex, "    \\\\\n");
+    fprintf(ftex, "    \\hline\n");
     }
-  fprintf(ftex, "    \\hline\n");
   fprintf(ftex, "  \\end{tabular}\n");
   fprintf(ftex, "  \\caption{\\textbf{Specimen %s slab %02d}}\n", param.id_string.c_str(), slab_id);
   fprintf(ftex, "\\end{figure}\n");
@@ -962,27 +1119,54 @@ int main(int argc, char *argv[])
     double off_y = sz[1]*sp[1]/2 - 5;
     double off_x = sz[0]*sp[0]/2 - 5;
 
+    // Compute the slab positions (TODO: optimize)
+    itk::ContinuousIndex<double, 3> idxCenter;
+    itk::Point<double, 3> pCenter;
+    for(unsigned int i = 0; i < 3; i++)
+      idxCenter[i] = sz[i] * 0.5;
+    i_comp_resampled->TransformContinuousIndexToPhysicalPoint(idxCenter, pCenter);
+    double y_center = -pCenter[1];
+
+    // The number of slabs
+    int n_slabs = (int) ceil(off_y / param.slit_spacing_mm) * 2;
+    printf("Slabs %d, center slab coordinates: %f\n", n_slabs, y_center);
+
+    // Create the slabs
+    std::vector<Slab> slabs(n_slabs);
+    for(int i = 0; i < n_slabs; i++)
+      {
+      slabs[i].y0 = y_center + (i - n_slabs/2.) * param.slit_spacing_mm;
+      slabs[i].y1 = slabs[i].y0 + param.slit_spacing_mm;
+      }
+
+
+
     // The next step is printing the main mold, which user may omit
     if(param.flag_print_hemisphere_mold)
       {
       cout << "Generating hemisphere mold" << endl;
 
-      // Figure out the parameters to the mold computation
-      double p1 = M_PI * 2.0 / param.slit_spacing_mm;
-      double p2 = M_PI * param.slit_width_mm / param.slit_spacing_mm;
+      // For each slab, generate a slit
+      api.Execute("-clear -push H -cmp -popas z -popas y -popas x "
+                  "-push H -scale 0 -shift 4");
 
-      // Create slits along the length of the mold
-      api.Execute(
-        "-origin-voxel 50%% -cmp -popas z -popas y -popas x "
-        "-push y -scale %f -cos -acos -thresh -inf %f -4 4 -as res1", 
-        param.mold_resolution_mm, p1, p2);
+      for(int i = 0; i <= n_slabs; i++)
+        {
+        // Cutting plane depth
+        double y_cut = (i < n_slabs) ? slabs[i].y0 : slabs[i-1].y1;
+
+        // Apply cutting plane
+        api.Execute("-push y -shift %f -abs -stretch 0 %f -4 4 -clip -4 4 -min",
+                    -y_cut, param.slit_width_mm);
+        }
+      api.Execute("-as res1 -o /tmp/res1.nii.gz");
 
       api.Execute(
         "-push x -info -thresh %f inf 4 -4 -max "
         "-push y -info -thresh %f %f -4 4 -max "
         "-insert H 1 -copy-transform "
         "-pad 5x5x5 5x5x5 -4 -as mold ",
-        off_x, -off_y, off_y);
+        off_x, y_center-off_y, y_center+off_y);
 
       // Extrude the brain image and trim extra plastic
       int p3 = (int) ceil(param.mold_wall_thickness_mm / param.mold_resolution_mm);
@@ -1006,26 +1190,6 @@ int main(int argc, char *argv[])
     // Get the coordinates of the cutting lines used above. In the future
     // we may want to optimize over these instead. 
     //
-    // The center line passes through the middle voxel of the image 'H' above
-    itk::ContinuousIndex<double, 3> idxCenter;
-    itk::Point<double, 3> pCenter;
-    for(unsigned int i = 0; i < 3; i++)
-      idxCenter[i] = sz[i] * 0.5;
-    i_comp_resampled->TransformContinuousIndexToPhysicalPoint(idxCenter, pCenter);
-    double y_center = -pCenter[1];
-
-    // The number of slabs
-    int n_slabs = (int) ceil(off_y / param.slit_spacing_mm) * 2;
-    printf("Slabs %d, center slab coordinates: %f\n", n_slabs, y_center);
-
-    // Create the slabs
-    std::vector<Slab> slabs(n_slabs);
-    for(int i = 0; i < n_slabs; i++)
-      {
-      slabs[i].y0 = y_center + (i - n_slabs/2.) * param.slit_spacing_mm;
-      slabs[i].y1 = slabs[i].y0 + param.slit_spacing_mm;
-      }
-
     // Process a slab
     for(int i = 0; i < n_slabs; i++)
       {
