@@ -15,13 +15,9 @@ include(${ITK_USE_FILE})
 find_package(Convert3D REQUIRED)
 include_directories(${Convert3D_INCLUDE_DIRS})
 
-# Find IPOPT
-find_package(IpOpt REQUIRED)
-include_directories(${IPOPT_INCLUDE_DIR})
-
 # Add the executable
-add_executable(brainmold brainmold.cxx GentleNLP.cxx IPOptProblemInterface.cxx)
-target_link_libraries(brainmold ${ITK_LIBRARIES} ${Convert3D_LIBRARIES} ${IPOPT_LIBRARIES})
+add_executable(brainmold brainmold.cxx)
+target_link_libraries(brainmold ${ITK_LIBRARIES} ${Convert3D_LIBRARIES})
 
 
 

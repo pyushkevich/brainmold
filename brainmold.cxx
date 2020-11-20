@@ -8,9 +8,7 @@
 #include <itkImageFileWriter.h>
 #include <itkImageRegionIteratorWithIndex.h>
 #include "SparseMatrix.h"
-#include "GentleNLP.h"
-#include "IPOptProblemInterface.h"
-#include <IpIpoptApplication.hpp>
+#include "SparseMatrix.txx"
 #include <itksys/SystemTools.hxx>
 
 #include <vnl/vnl_cost_function.h>
@@ -63,7 +61,9 @@ enum OutputKind {
   SLAB_C3D_LOG,
   SLAB_OPTIMIZATION_LOG,
   SLAB_CUTPLANE_JSON,
-  SLAB_CUT_PNG
+  SLAB_CUT_PNG,
+  SLAB_CUT_TEXLET,
+  GLOBAL_TEXFILE
 };
 
 
@@ -101,7 +101,13 @@ string get_output_filename(Parameters &param, OutputKind type, int slab = -1)
       sprintf(fn_out, "%s/%s_slab%02d_cutplanes.json", root, id, slab);
       break;
     case SLAB_CUT_PNG:
-      sprintf(fn_out, "%s/%s_slab%02d_cuts.png", root, id, slab);
+      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.png", root, id, slab);
+      break;
+    case SLAB_CUT_TEXLET:
+      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
+      break;
+    case GLOBAL_TEXFILE:
+      sprintf(fn_out, "%s/tex/%s_print_template.tex", root, id);
       break;
   }
 
@@ -161,62 +167,6 @@ void save_image(TImage *img, const std::string &fn)
 typedef std::pair<double, double> CutPlane;
 typedef std::vector<CutPlane> CutPlaneList;
 
-/**
- * Exponentiation
- */
-class ExpOperatorTraits
-{
-public:
-
-  static double Operate(double a)
-  {
-    return exp(a);
-  }
-
-  static gnlp::Expression *Differentiate(
-      gnlp::Problem *p, gnlp::Expression *self,
-      gnlp::Expression *, gnlp::Expression *dA)
-  {
-    return gnlp::MakeProduct(p, self, dA);
-  }
-
-  static std::string GetName(gnlp::Expression *a)
-  {
-    std::ostringstream oss;
-    oss << "exp(" << a->GetName() << ")";
-    return oss.str();
-  }
-};
-
-
-/**
- * Sigmoid operation
- */
-class SigmoidOperatorTraits
-{
-public:
-
-  static double Operate(double a)
-  {
-    double ea = exp(-a);
-    return 1.0 / (1.0 + ea);
-  }
-
-  static gnlp::Expression *Differentiate(
-      gnlp::Problem *p, gnlp::Expression *self,
-      gnlp::Expression *a, gnlp::Expression *dA)
-  {
-    auto *exp_minus_a = new gnlp::UnaryExpression<ExpOperatorTraits>(p, new gnlp::Negation(p, a));
-    return gnlp::MakeProduct(p, self, self, gnlp::MakeProduct(p, dA, exp_minus_a));
-  }
-
-  static std::string GetName(gnlp::Expression *a)
-  {
-    std::ostringstream oss;
-    oss << "sigmoid(" << a->GetName() << ")";
-    return oss.str();
-  }
-};
 
 
 /*
@@ -281,7 +231,7 @@ public:
   typedef ImmutableSparseMatrix<double> SparseMatrixType;
 
   /** Initialize graph data structures for an input slab */
-  SlabCutPlaneBruteOptimization(ImageType *slab)
+  SlabCutPlaneBruteOptimization(ImageType *slab, ImageType *dots)
   {
     // Output goes to std::out
     m_SOut = &std::cout;
@@ -372,6 +322,37 @@ public:
 
     // Compute connected components in the input dataset
     m_WholeComp = count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
+
+    // Traverse the dots image and record all the locations that must be avoided
+    auto reg_dots = dots->GetBufferedRegion();
+    itk::ImageRegionConstIteratorWithIndex<ImageType> itDotsSrc(dots, reg_dots);
+    unsigned int n_dots_pixels = 0;
+    for( ; !itDotsSrc.IsAtEnd(); ++itDotsSrc)
+      {
+      if(itDotsSrc.Get() > 0)
+        n_dots_pixels++;
+      }
+
+    // Second pass, generate coordinate arrays
+    m_DotsX.set_size(n_dots_pixels, 3);
+    itk::ImageRegionConstIteratorWithIndex<ImageType> itDotsSrc2(dots, reg_dots);
+    for(int kDots = 0; !itDotsSrc2.IsAtEnd(); ++itDotsSrc2)
+      {
+      if(itDotsSrc2.Get())
+        {
+        // Map index to RAS coordinate
+        auto idx = itDotsSrc2.GetIndex();
+        itk::Point<double, 3> pt;
+        dots->TransformIndexToPhysicalPoint(idx, pt);
+        pt[0] *= -1.0; pt[1] *= -1.0;
+
+        // Set coordinate array
+        for(unsigned int d = 0; d < 3; d++)
+          m_DotsX(kDots,d) = pt[d];
+
+        kDots++;
+        }
+      }
   }
 
   /** Set up optimization for specific number of cut planes */
@@ -437,6 +418,9 @@ public:
     *m_SOut << "==== ITERATION " << setw(3) << ++m_Iter << " ====" << endl;
     *m_SOut << "  Parameters: " << vnl_vector<double>(x, m_NumUnknowns) << endl;
 
+    // Keep track of minimum dots distance
+    double min_dots_distance = 1.0e100;
+
     // Apply each plane to every vertex
     m_NodeLabel.fill(0);
     for(unsigned int k = 0; k < cpl.size(); k++)
@@ -450,6 +434,13 @@ public:
         {
         double d = m_X[i][0] * cos_theta + m_X[i][2] * sin_theta;
         m_NodeLabel[i] += (d < r) ? label_k : 0;
+        }
+
+      for(unsigned int q = 0; q < m_DotsX.rows(); q++)
+        {
+        double dd = fabs(m_DotsX[q][0] * cos_theta + m_DotsX[q][2] * sin_theta - r);
+        if(min_dots_distance > dd)
+          min_dots_distance = dd;
         }
       }
 
@@ -499,13 +490,17 @@ public:
       }
     *m_SOut << "  Extent violation penalty: " << penalty_extent << endl;
 
-
     // Compute number of connected components
     int n_comp = count_connected_components_bfs(&m_S, m_NodeLabel.data_block(), m_CompIndex.data_block());
     double penalty_conn = n_comp * 1.0;
 
     *m_SOut << "  Connected components in graph: " << n_comp << endl;
     *m_SOut << "  Connected components penalty: " << penalty_conn << endl;
+
+    // Compute the minimum distance from dots to cut planes
+    double dots_dist_penalty = (min_dots_distance < 5) ? 100 * (5 - min_dots_distance) : 0;
+    *m_SOut << "  Minimum distance from dots to cutplanes: " << min_dots_distance << endl;
+    *m_SOut << "  Dots distance penalty: " << dots_dist_penalty << endl;
 
     // Compute the variance in volume
     double var_vol = (ssq_vol - sum_vol / n_vol) / n_vol;
@@ -514,7 +509,7 @@ public:
     *m_SOut << "  Volume variance penalty:" << std_vol << endl;
 
     // Total objective
-    double total_obj = penalty_extent + penalty_conn + var_vol;
+    double total_obj = penalty_extent + penalty_conn + dots_dist_penalty + var_vol;
     *m_SOut << "  Total objective:" << total_obj << endl;
 
     return total_obj;
@@ -575,7 +570,7 @@ private:
   SparseMatrixType m_S;
 
   // Matrix of xyz coordinates of the foreground voxels in the mask
-  vnl_matrix<double> m_X;
+  vnl_matrix<double> m_X, m_DotsX;
 
   // Center of mass
   vnl_vector_fixed<double, 3> m_XMin, m_XMax, m_XDim, m_XCtr;
@@ -602,316 +597,67 @@ int palette[] = {
   0xff1493, 0xafeeee, 0xee82ee, 0x98fb98, 0x7fffd4, 0xff69b4, 0xffe4c4, 0xffb6c1
 };
 
-
-class SlabCutPlaneOptimization
-{
-public:
-  typedef ImmutableSparseMatrix<double> SparseMatrixType;
-
-  SlabCutPlaneOptimization(ImageType *slab) : m_Problem(NULL)
-  {
-    // On the first pass, label the image with vertex indices and set coord arrays
-    typedef itk::Image<int, 3> LabelImage;
-    typename LabelImage::Pointer imgLabel = LabelImage::New();
-    imgLabel->CopyInformation(slab);
-    imgLabel->SetRegions(slab->GetBufferedRegion());
-    imgLabel->Allocate();
-    imgLabel->FillBuffer(-1);
-
-    auto region = slab->GetBufferedRegion();
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc(slab, region);
-    itk::ImageRegionIterator<LabelImage> itDest(imgLabel, region);
-    unsigned int n = 0;
-    for( ; !itSrc.IsAtEnd(); ++itSrc, ++itDest)
-      {
-      if(itSrc.Get())
-        itDest.Set(n++);
-      }
-
-    // Second pass, generate coordinate arrays
-    m_X.set_size(n, 3);
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itSrc2(slab, region);
-    int k = 0;
-    for(; !itSrc2.IsAtEnd(); ++itSrc2)
-      {
-      if(itSrc2.Get())
-        {
-        // Map index to RAS coordinate
-        auto idx = itSrc2.GetIndex();
-        itk::Point<double, 3> pt;
-        slab->TransformIndexToPhysicalPoint(idx, pt);
-        pt[0] *= -1.0; pt[1] *= -1.0;
-
-        // Set coordinate array
-        for(unsigned int d = 0; d < 3; d++)
-          m_X(k,d) = pt[d];
-
-        k++;
-        }
-      }
-
-    // Compute center of mass, extents
-    for(unsigned int d = 0; d < 3; d++)
-      {
-      auto c = m_X.get_column(d);
-      m_XMin[d] = c.min_value();
-      m_XMax[d] = c.max_value();
-      }
-
-    // Shrink region by one for next application
-    for(unsigned int d = 0; d < 3; d++)
-      region.SetSize(d, region.GetSize()[d] - 1);
-
-    vnl_sparse_matrix<double> smat(n, n);
-    itk::ImageRegionIteratorWithIndex<LabelImage> it(imgLabel, region);
-    for( ; !it.IsAtEnd(); ++it)
-      {
-      int l = it.Get();
-      if(l >= 0)
-        {
-        auto idx = it.GetIndex();
-        for(unsigned int d = 0; d < 3; d++)
-          {
-          idx[d]++;
-          int l_nbr = imgLabel->GetPixel(idx);
-          if(l_nbr >= 0)
-            {
-            smat(l, l_nbr) = 1.0;
-            smat(l_nbr, l) = 1.0;
-            }
-          idx[d]--;
-          }
-        }
-      }
-
-    // Set the sparse matrix
-    m_S.SetFromVNL(smat);
-
-    // Allocate the label array
-    m_NodeLabel.set_size(n);
-  }
-
-  // Set up the optimization with given number of horizontal and vertical cuts
-  void SetupOptimization(unsigned int n_horiz, unsigned int n_vert)
-  {
-    // Create a new optimization problem
-    if(m_Problem)
-      delete m_Problem;
-    m_Problem = new gnlp::ConstrainedNonLinearProblem();
-
-    // Set up the orientation of the stack. For simplicity, we define two variables
-    // for cosine and sine of the angle, that have to add up to one
-    v_CosTheta = m_Problem->AddVariable("CosTheta", 1, sqrt(2.) / 2., 1.0);
-    v_SinTheta = m_Problem->AddVariable("SinTheta", 0);
-
-    // Add constraint on cosine and sine
-    m_Problem->AddConstraint(new gnlp::BinarySum(
-                               m_Problem,
-                               new gnlp::Square(m_Problem, v_CosTheta),
-                               new gnlp::Square(m_Problem, v_SinTheta)),
-                             "sincos", 1.0, 1.0);
-
-    // Create expressions for the sum of heights and widths
-    gnlp::BigSum *sum_width = new gnlp::BigSum(m_Problem);
-    gnlp::BigSum *sum_height = new gnlp::BigSum(m_Problem);
-
-    // Expressions for the cut planes in polar format
-    x_CutPlaneR.clear();
-    x_CutPlaneCosTheta.clear();
-    x_CutPlaneSinTheta.clear();
-
-    // Total width and height of dataset
-    double w = m_XMax[0] - m_XMin[0], h = m_XMax[2] - m_XMin[2];
-
-    // For each plane, set up the variables
-    v_CutWidths.clear();
-    gnlp::Expression *r_prev = new gnlp::Constant(m_Problem, m_XMin[0]);
-    for(unsigned int i = 0; i <= n_horiz; i++)
-      {
-      v_CutWidths.push_back(m_Problem->AddVariable("W_i", w / (n_horiz+1), 0, 75));
-      sum_width->AddSummand(v_CutWidths.back());
-      if(i < n_horiz)
-        {
-        x_CutPlaneR.push_back(new gnlp::BinarySum(m_Problem, r_prev, v_CutWidths.back()));
-        x_CutPlaneCosTheta.push_back(v_CosTheta);
-        x_CutPlaneSinTheta.push_back(v_SinTheta);
-        r_prev = x_CutPlaneR.back();
-        }
-      }
-
-    v_CutHeights.clear();
-    r_prev = new gnlp::Constant(m_Problem, m_XMin[2]);
-    for(unsigned int i = 0; i <= n_vert; i++)
-      {
-      v_CutHeights.push_back(m_Problem->AddVariable("H_i", h / (n_vert+1), 0, 50));
-      sum_height->AddSummand(v_CutHeights.back());
-      if(i < n_vert)
-        {
-        x_CutPlaneR.push_back(new gnlp::BinarySum(m_Problem, r_prev, v_CutHeights.back()));
-        x_CutPlaneCosTheta.push_back(new gnlp::Negation(m_Problem, v_SinTheta));
-        x_CutPlaneSinTheta.push_back(v_CosTheta);
-        r_prev = x_CutPlaneR.back();
-        }
-      }
-
-    // Add a constraint that the heights must add up to total width and height
-    m_Problem->AddConstraint(sum_width, "sum_w", w, w);
-    m_Problem->AddConstraint(sum_height, "sum_h", h, h);
-
-    cout << "Sum Height: " << sum_height->GetName() << endl;
-
-    // Compute the volume of each partition. This is obtained by applying a sigmoid
-    // function to the inputs with respect to each plane
-    gnlp::VarVecArray alpha(m_X.rows(), gnlp::VarVec(x_CutPlaneR.size()));
-    gnlp::VarVecArray beta(m_X.rows(), gnlp::VarVec(x_CutPlaneR.size()));
-
-    // Number of regions
-    unsigned int n_rgn = (1 << x_CutPlaneR.size());
-
-    // Number of pixels for each slide
-    std::vector<gnlp::BigSum *> rgn_volume(n_rgn, NULL);
-    for(unsigned int k = 0; k < n_rgn; k++)
-      rgn_volume[k] = new gnlp::BigSum(m_Problem);
-
-    for(unsigned int j = 0; j < m_X.rows(); j++)
-      {
-      // Coordinates of the point
-      gnlp::Expression *xj = new gnlp::Constant(m_Problem, m_X[j][0]);
-      gnlp::Expression *yj = new gnlp::Constant(m_Problem, m_X[j][2]);
-
-      // Compute the membership of the point with respect to each cut plane
-      for(unsigned int i = 0; i < x_CutPlaneR.size(); i++)
-        {
-        // Projection on the normal vector of the cut
-        gnlp::Expression *dij = new gnlp::BinarySum(
-                                  m_Problem,
-                                  new gnlp::BinaryProduct(m_Problem, xj, x_CutPlaneCosTheta[i]),
-                                  new gnlp::BinaryProduct(m_Problem, yj, x_CutPlaneSinTheta[i]));
-
-        // A value whose sign indicates what side of the plane we are on
-        gnlp::Expression* dr = new gnlp::BinaryDifference(m_Problem, dij, x_CutPlaneR[i]);
-
-        // Apply the sigmoid here
-        typedef gnlp::UnaryExpression<SigmoidOperatorTraits> Sigmoid;
-        alpha[j][i] = new Sigmoid(m_Problem, dr);
-        beta[j][i] = new gnlp::BinaryDifference(
-                       m_Problem, new gnlp::Constant(m_Problem, 1.0), alpha[j][i]);
-        }
-
-      // Membership is product of alphas and betas
-      for(unsigned int k = 0; k < n_rgn; k++)
-        {
-        gnlp::Expression *ab_prod = NULL;
-        for(unsigned int i = 0; i < x_CutPlaneR.size(); i++)
-          {
-          bool use_alpha = k & (1 << i);
-          gnlp::Expression *ab = use_alpha ? alpha[j][i] : beta[j][i];
-          ab_prod = ab_prod ? gnlp::MakeProduct(m_Problem, ab_prod, ab) : ab;
-          }
-
-          // Add this product to the volume for k
-          rgn_volume[k]->AddSummand(ab_prod);
-        }
-      }
-
-    // Finally, we want to compute the variance in volume
-    gnlp::BigSum *sum_vol = new gnlp::BigSum(m_Problem);
-    gnlp::BigSum *sum_vol_sq = new gnlp::BigSum(m_Problem);
-    for(unsigned int k = 0; k < n_rgn; k++)
-      {
-      sum_vol->AddSummand(rgn_volume[k]);
-      sum_vol_sq->AddSummand(new gnlp::Square(m_Problem, rgn_volume[k]));
-      }
-
-    // This is the variance in volume
-    gnlp::Expression *var_vol =
-        new gnlp::ScalarProduct(
-          m_Problem,
-          new gnlp::BinaryDifference(
-            m_Problem,
-            sum_vol_sq,
-            new gnlp::ScalarProduct(
-              m_Problem,
-              new gnlp::Square(m_Problem, sum_vol),
-              1.0 / n_rgn)),
-          1.0 / n_rgn);
-
-    // Add this to the objective
-    m_Problem->SetObjective(var_vol);
-    m_Problem->SetupProblem(false, false);
-  }
-
-  // Test sigmoid
-  void TestSigmoid()
-  {
-    auto *p = new gnlp::ConstrainedNonLinearProblem();
-    auto *v = p->AddVariable("x", -4.3);
-    auto *s = new gnlp::UnaryExpression<SigmoidOperatorTraits>(p, v);
-    p->SetObjective(s);
-    p->SetupProblem(false, true);
-    printf("Sigmoid test done\n");
-  }
-
-  // Perform optimization
-  CutPlaneList RunOptimization()
-  {
-    FILE *f_con = fopen("/tmp/f_con.log","wt");
-    SmartPtr<IPOptProblemInterface> ip_opt = new IPOptProblemInterface(m_Problem, false);
-    ip_opt->log_constraints(f_con);
-    IpoptApplication *app = IpoptApplicationFactory();
-    app->Options()->SetNumericValue("tol", 1e-8);
-    app->Options()->SetStringValue("linear_solver", "ma57");
-    app->Options()->SetIntegerValue("max_iter", 200);
-    app->Options()->SetStringValue("hessian_approximation", "limited-memory");
-
-    auto status = app->Initialize();
-    if(status != Solve_Succeeded)
-      throw ConvertAPIException("IPOpt Initialization Failed");
-
-    status = app->OptimizeTNLP(GetRawPtr(ip_opt));
-
-    // Construct the solution in the form of a list of cut planes
-    CutPlaneList cpl;
-    for(unsigned int i = 0; i < x_CutPlaneR.size(); i++)
-      {
-      CutPlane cp = make_pair(
-                      x_CutPlaneR[i]->Evaluate(),
-                      atan2(x_CutPlaneSinTheta[i]->Evaluate(), x_CutPlaneCosTheta[i]->Evaluate()));
-      cpl.push_back(cp);
-      }
-
-    return cpl;
-  }
-
-protected:
-
-  // Sparse matrix representation of non-zero voxels
-  SparseMatrixType m_S;
-
-  // Matrix of xyz coordinates of the foreground voxels in the mask
-  vnl_matrix<double> m_X;
-
-  // Center of mass
-  vnl_vector_fixed<double, 3> m_XMin, m_XMax;
-
-  // Node labels
-  vnl_vector<int> m_NodeLabel;
-
-  // The problem
-  gnlp::ConstrainedNonLinearProblem *m_Problem;
-
-  // Horizontal and vertical cut plane data
-  std::vector<gnlp::Variable *> v_CutHeights, v_CutWidths;
-
-  // Cutplane properties
-  std::vector<gnlp::Expression *> x_CutPlaneR, x_CutPlaneSinTheta, x_CutPlaneCosTheta;
-
-  // Orientation of the cuts
-  gnlp::Variable *v_CosTheta, *v_SinTheta;
+struct LabelStats {
+  int label;
+  int count = 0;
+  vnl_vector_fixed<double, 3> center_of_mass, extent, x_min, x_max;
 };
 
+map<int, LabelStats> get_label_stats(ImageType *img)
+{
+  map<int, LabelStats> stats;
+  itk::ImageRegionIteratorWithIndex<ImageType> iter(img, img->GetBufferedRegion());
+  LabelStats *curr_stat = NULL;
+  for(; !iter.IsAtEnd(); ++iter)
+    {
+    // Round the double value to an int
+    int label = (int) (iter.Get() + 0.5);
+    if(label <= 0)
+      continue;
 
-void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_raw, ImageType *i_hemi_mask)
+    // Point to the current stat
+    if(curr_stat == NULL || curr_stat->label != label)
+      curr_stat = &(stats[label]);
+
+    // Get coordinate
+    typename ImageType::PointType pt;
+    img->TransformIndexToPhysicalPoint(iter.GetIndex(), pt);
+    pt[0] *= -1.0; pt[1] *= -1.0;
+    vnl_vector_fixed<double, 3> x_pt(pt.GetVnlVector().data_block());
+
+    // Initialize stat
+    if(curr_stat->count == 0)
+      {
+      curr_stat->label = label;
+      curr_stat->center_of_mass = x_pt;
+      curr_stat->x_min = x_pt;
+      curr_stat->x_max = x_pt;
+      curr_stat->count = 1;
+      }
+    else
+      {
+      curr_stat->center_of_mass += x_pt;
+      for(unsigned int d = 0; d < 3; d++)
+        {
+        curr_stat->x_min[d] = min(curr_stat->x_min[d], x_pt[d]);
+        curr_stat->x_max[d] = max(curr_stat->x_max[d], x_pt[d]);
+        }
+      curr_stat->count++;
+      }
+    }
+
+  // Normalize
+  for(auto &x : stats)
+    {
+    x.second.center_of_mass *= 1.0 / x.second.count;
+    x.second.extent = x.second.x_max - x.second.x_min;
+    }
+
+  return stats;
+}
+
+void process_slab(Parameters &param, int slab_id, Slab &slab,
+                  ImageType *i_hemi_raw, ImageType *i_hemi_mask, ImageType *i_dots)
 {
   // C3D output should be piped to a log file
   ofstream c3d_log(get_output_filename(param, SLAB_C3D_LOG, slab_id).c_str());
@@ -923,7 +669,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
 
   // Deal with the raw image (for visualization)
   api.AddImage("raw", i_hemi_raw);
-  api.Execute("-verbose -push raw -cmp -pick 1 -thresh %f %f 1 0 "
+  api.Execute("-verbose -push raw -cmp -pick 1 -thresh %f %f 1 0 -as slab_mask "
               "-push raw -times -trim 10x2x10vox -as slab_raw -o /tmp/slab_raw.nii.gz",
               slab.y0, slab.y1);
 
@@ -944,60 +690,38 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
 
   // For the cut plane computation, apply more some erosion to the slab, so that
   // we don't end up with really tiny tissue bridges
-  api.Execute("-dilate 0 11x0x11 -as slab_trim -o /tmp/slab_trim.nii.gz");
+  api.Execute("-dilate 0 11x0x11 -as slab_trim");
+
+  // Extract the slab from the dots image as well
+  api.AddImage("dots", i_dots);
+  api.Execute(
+        "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
+        "-insert slab 1 -int 0 -reslice-identity -as dots_slab -o /tmp/dots_slab.nii.gz");
 
   // Cut plane list
   CutPlaneList cpl;
 
-  // IPOpt based optimization
-  if(true)
-    {
-    // Optimization output should be piped to a log file
-    string fn_opt_log = get_output_filename(param, SLAB_OPTIMIZATION_LOG, slab_id);
-    ofstream opt_log(fn_opt_log.c_str());
+  // Optimization output should be piped to a log file
+  string fn_opt_log = get_output_filename(param, SLAB_OPTIMIZATION_LOG, slab_id);
+  ofstream opt_log(fn_opt_log.c_str());
 
-    // Set up the optimizer
-    SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab_trim"));
-    if(scp_opt.GetNumberOfComponentsInSlab() == 0)
-      {
-      cout << "  No components in slab, skipping mold generation" << endl;
-      return;
-      }
-    else
-      {
-      cout << "  Slab contains " << scp_opt.GetNumberOfComponentsInSlab() << " components." << endl;
-      }
-    scp_opt.RedirectOutput(opt_log);
-    scp_opt.SetupOptimization(0,0);
-    vnl_vector<double> x0 = scp_opt.GetInitialParameters();
-    scp_opt.ComputeObjective(x0.data_block());
-    vnl_vector<double> x_opt = scp_opt.Optimize(200);
-    cpl = scp_opt.GetCutPlanes(x_opt.data_block());
+  // Set up the optimizer
+  SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab_trim"), api.GetImage("dots_slab"));
+  if(scp_opt.GetNumberOfComponentsInSlab() == 0)
+    {
+    cout << "  No components in slab, skipping mold generation" << endl;
+    return;
     }
   else
     {
-    // Extract the slab image region
-    api.Execute(
-          "-clear -push H -cmp -pick 1 -thresh %f %f 1 0 "
-          "-push H -times -trim %dvox -as slab "
-          "-mf 0x%dx0 -info -slice y 50%% -resample 20%%x20%%x100%% -thresh 0.5 inf 1 0 -swapdim LPI -info -as slab_slice ",
-          slab.y0, slab.y1, y_pad, mf_rad);
-
-    // Generate a sparse matrix for faster optimization
-    SlabCutPlaneOptimization scp_opt(api.GetImage("slab_slice"));
-
-    // Report
-    double t0 = clock();
-    printf("Starting optimization set up\n");
-    scp_opt.SetupOptimization(0, 2);
-    double t1 = clock();
-    printf("Optimization set up completed in %f seconds\n", (t1 - t0) / CLOCKS_PER_SEC);
-
-    printf("Starting optimization\n");
-    CutPlaneList cpl = scp_opt.RunOptimization();
-    double t2 = clock();
-    printf("Optimization completed in %f seconds\n", (t2 - t1) / CLOCKS_PER_SEC);
+    cout << "  Slab contains " << scp_opt.GetNumberOfComponentsInSlab() << " components." << endl;
     }
+  scp_opt.RedirectOutput(opt_log);
+  scp_opt.SetupOptimization(0,0);
+  vnl_vector<double> x0 = scp_opt.GetInitialParameters();
+  scp_opt.ComputeObjective(x0.data_block());
+  vnl_vector<double> x_opt = scp_opt.Optimize(200);
+  cpl = scp_opt.GetCutPlanes(x_opt.data_block());
 
   // If there is no cuts, return
   if(cpl.size() == 0)
@@ -1081,7 +805,9 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
         "-push cuts -thresh 0 inf 1 0 -min -popas F -clear "
         "-push slabvol -replace 0 255 -split "
         "-foreach -thresh 0 0 1 0 -swapdim PRS -extrude-seg -swapdim ARS -extrude-seg -swapdim LPI -thresh 0 0 1 0 -endfor "
-        "-scale 0.1 -merge -int 0 -insert F 1 -reslice-identity -push F -replace 1 255 -min "
+        "-scale 0.1 -merge -int 0 -insert F 1 -background 255 -reslice-identity -push F -replace 1 255 -min "
+        "-dup -push dots_slab -thresh 0 0 1 0 -swapdim PRS -extrude-seg -swapdim ARS -extrude-seg -swapdim LPI "
+        "-thresh 0 0 0 255 -background 0 -reslice-identity -as dd -min -push dd -thresh 255 255 0 128 -add "
         "-slice y 50%% -as png_slice -clear");
 
   // Generate replace commands for R/G/B (like -oli but with in-memory palette)
@@ -1096,7 +822,48 @@ void process_slab(Parameters &param, int slab_id, Slab &slab, ImageType *i_hemi_
       }
     api.Execute("-push png_slice %s", oss.str().c_str());
     }
-  api.Execute("-type uchar -foreach -flip y -endfor -omc %s", get_output_filename(param, SLAB_CUT_PNG, slab_id).c_str());
+  string fn_png = get_output_filename(param, SLAB_CUT_PNG, slab_id);
+  api.Execute("-type uchar -foreach -flip y -endfor -omc %s", fn_png.c_str());
+
+  // Generate the tex file
+  ImagePointer slice = api.GetImage("png_slice");
+  double ext_x = slice->GetBufferedRegion().GetSize()[0] * slice->GetSpacing()[0];
+  double ext_y = slice->GetBufferedRegion().GetSize()[1] * slice->GetSpacing()[1];
+
+  ofstream otex(get_output_filename(param, SLAB_CUT_TEXLET, slab_id).c_str());
+
+  // Generate Latex. Here it is easier to use fprintf
+  FILE *ftex = fopen(get_output_filename(param, SLAB_CUT_TEXLET, slab_id).c_str(), "wt");
+  fprintf(ftex,
+          "\\begin{figure}\n"
+          "  \\centering\n"
+          "  \\scalebox{-1}[1]{\\includegraphics[width=%fmm,height=%fmm]{%s}}\n"
+          "  \\hfill"
+          "  \\scalebox{1}[1]{\\includegraphics[width=%fmm,height=%fmm]{%s}}\n"
+          "  \\newline \\newline \\newline \n",
+          ext_x, ext_y, itksys::SystemTools::GetFilenameWithoutExtension(fn_png).c_str(),
+          ext_x, ext_y, itksys::SystemTools::GetFilenameWithoutExtension(fn_png).c_str());
+
+  // Insert a table with available labels
+  auto stat_vol = get_label_stats(api.GetImage("slabvol"));
+  fprintf(ftex, "  \\begin{tabular}{");
+  for(int k = 0; k < stat_vol.size(); k++)
+    fprintf(ftex, "|c");
+  fprintf(ftex,"|}\n    \\hline\n");
+  int k = 0;
+  for(auto it : stat_vol)
+    {
+    fprintf(ftex, "    \\cellcolor[rgb]{%f,%f,%f}\\textbf{Block %02d-%d} %s \n",
+            ((palette[it.first-1] >> 2) & 0xff) / 255.0,
+            ((palette[it.first-1] >> 1) & 0xff) / 255.0,
+            ((palette[it.first-1] >> 0) & 0xff) / 255.0,
+            slab_id, it.first, (++k) == stat_vol.size() ? "\\\\" : "&");
+    }
+  fprintf(ftex, "    \\hline\n");
+  fprintf(ftex, "  \\end{tabular}\n");
+  fprintf(ftex, "  \\caption{\\textbf{Specimen %s slab %02d}}\n", param.id_string.c_str(), slab_id);
+  fprintf(ftex, "\\end{figure}\n");
+  fclose(ftex);
 }
 
 
@@ -1123,6 +890,10 @@ int main(int argc, char *argv[])
       param.fn_input_mri = argv[++i];
       param.fn_input_seg = argv[++i];
       }
+    else if(arg == "-d")
+      {
+      param.fn_input_dots = argv[++i];
+      }
     else if(arg == "-o" && n_trail > 0)
       {
       param.fn_output_root = argv[++i];
@@ -1143,12 +914,6 @@ int main(int argc, char *argv[])
       }
     }
 
-  // Load the data
-  typename ReaderType::Pointer r_mask = ReaderType::New();
-  r_mask->SetFileName(param.fn_input_seg.c_str());
-  r_mask->Update();
-  ImagePointer i_mask = r_mask->GetOutput();
-
   // C3D output should be piped to a log file
   string fn_c3d_log = get_output_filename(param, HEMI_C3D_LOG);
   ofstream c3d_log(fn_c3d_log.c_str());
@@ -1158,7 +923,16 @@ int main(int argc, char *argv[])
     { 
     ConvertAPIType api;
     api.RedirectOutput(c3d_log, c3d_log);
-    api.AddImage("mask", i_mask);
+
+    // Read the mask image and dots (avoidance) image
+    api.Execute("-verbose %s -popas mask", param.fn_input_seg.c_str());
+    if(param.fn_input_dots.size())
+      api.Execute("%s -swapdim LPI -popas dots", param.fn_input_dots.c_str());
+    else
+      api.Execute("-push mask -scale 0 -swapdim LPI -popas dots");
+
+    ImagePointer i_mask = api.GetImage("mask");
+    ImagePointer i_dots = api.GetImage("dots");
 
     // The first thing is to reorient the image, upsample to desired resolution, 
     // and extract the largest connected component
@@ -1172,7 +946,7 @@ int main(int argc, char *argv[])
     // (should be specified as input)
     cout << "Extracting hemisphere main connected component and resampling" << endl;
     api.Execute(
-          "-verbose -push mask -swapdim LPI -thresh 1 1 1 0 -as comp_raw "
+          "-push mask -swapdim LPI -thresh 1 1 1 0 -as comp_raw "
           "-dilate 1 %dx%dx%d -dilate 0 %dx%dx%d -as comp "
           "-trim 5mm -resample-mm %fmm -as H ",
           param.preproc_dilation, param.preproc_dilation, param.preproc_dilation,
@@ -1258,9 +1032,30 @@ int main(int argc, char *argv[])
       if(param.selected_slab < 0 || param.selected_slab == i)
         {
         cout << "Generating mold for slab " << i << " of " << n_slabs << endl;
-        process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled);
+        process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots);
         }
       }
+
+    // Generate the final tex file
+    FILE *f_tex = fopen(get_output_filename(param, GLOBAL_TEXFILE).c_str(), "wt");
+    fprintf(f_tex,
+            "\\documentclass{article}\n"
+            "\\usepackage[table]{xcolor}\n"
+            "\\usepackage{graphicx}\n"
+            "\\usepackage[letterpaper, margin=1in]{geometry}\n"
+            "\\renewcommand{\\arraystretch}{1.5}\n"
+            "\\setlength\\tabcolsep{0.25in}\n"
+            "\\begin{document}\n");
+
+    for(int i = 0; i < n_slabs; i++)
+      {
+      string fn_tex = get_output_filename(param, SLAB_CUT_TEXLET, i);
+      if(itksys::SystemTools::FileExists(fn_tex))
+        fprintf(f_tex, "  \\include{%s}\n",
+                itksys::SystemTools::GetFilenameWithoutExtension(fn_tex).c_str());
+      }
+    fprintf(f_tex, "\\end{document}\n");
+    fclose(f_tex);
     }
   catch(ConvertAPIException &exc)
     {
