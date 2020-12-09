@@ -30,12 +30,16 @@ class Parameters
 public:
   // Things related to input and output files
   string fn_input_mri, fn_input_seg, fn_input_dots;
+  string fn_input_avoidance;
   string fn_output_root;
   string id_string;
 
+  // Side of the hemisphere
+  char side = 'N';
+
   // Parameters for mold creation
   double slit_spacing_mm = 10.0;
-  double slit_width_mm = 0.8;
+  double slit_width_mm = 1.6;
   double mold_resolution_mm = 0.4;
   double mold_wall_thickness_mm = 3;
   double mold_floor_thickness_mm = 3;
@@ -140,12 +144,14 @@ int usage()
     "  brainmold [options]\n"
     "required options:\n"
     "  -s                       Subject ID, used in naming files\n"
+    "  -h <L|R>                 Which hemisphere (left/right)\n"
     "  -i <mri> <mask>          Input MRI and brain mask\n"
     "  -o <dir>                 Output directory\n"
     "optional inputs:\n"
-    "  -d <image>               Dots file\n"
+    "  -d <image>               Dots segmentation image\n"
+    "  -a <image>               Avoidance segmentation image\n"
     "  --no-hemi-mold           Skip hemisphere mold printing\n"
-    "  --slab <index>           Only generate for one slab\n"
+    "  --slab <index>           Only generate for one slab (negative for none)\n"
     );
 
   return -1;
@@ -343,6 +349,9 @@ public:
   // Apply a set of cut planes to the image
   void ApplyCutPlanes(CutPlaneList &cpl)
   {
+    // Reset the distance
+    m_MinDistanceToCut = 1e100;
+
     // Apply each plane to every vertex
     m_NodeLabel.fill(0);
     for(unsigned int k = 0; k < cpl.size(); k++)
@@ -356,6 +365,10 @@ public:
         {
         double d = m_X[i][0] * cos_theta + m_X[i][2] * sin_theta;
         m_NodeLabel[i] += (d < r) ? label_k : 0;
+
+        double dd = fabs(d - r);
+        if(m_MinDistanceToCut > dd)
+          m_MinDistanceToCut = dd;
         }
       }
   }
@@ -405,6 +418,8 @@ public:
   // Node labels and connected component labels
   vnl_vector<int> m_NodeLabel, m_CompIndex;
 
+  double m_MinDistanceToCut;
+
   // Number of components
   int m_WholeComp;
 };
@@ -416,42 +431,11 @@ public:
   typedef ImmutableSparseMatrix<double> SparseMatrixType;
 
   /** Initialize graph data structures for an input slab */
-  SlabCutPlaneBruteOptimization(ImageType *slab_full, ImageType *slab_eroded, ImageType *dots)
-    : m_VGFull(slab_full), m_VGEroded(slab_eroded)
+  SlabCutPlaneBruteOptimization(ImageType *slab_full, ImageType *dots, ImageType *avoid)
+    : m_VGFull(slab_full), m_VGDots(dots), m_VGAvoid(avoid)
   {
     // Output goes to std::out
     m_SOut = &std::cout;
-
-    // Traverse the dots image and record all the locations that must be avoided
-    auto reg_dots = dots->GetBufferedRegion();
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itDotsSrc(dots, reg_dots);
-    unsigned int n_dots_pixels = 0;
-    for( ; !itDotsSrc.IsAtEnd(); ++itDotsSrc)
-      {
-      if(itDotsSrc.Get() > 0)
-        n_dots_pixels++;
-      }
-
-    // Second pass, generate coordinate arrays
-    m_DotsX.set_size(n_dots_pixels, 3);
-    itk::ImageRegionConstIteratorWithIndex<ImageType> itDotsSrc2(dots, reg_dots);
-    for(int kDots = 0; !itDotsSrc2.IsAtEnd(); ++itDotsSrc2)
-      {
-      if(itDotsSrc2.Get())
-        {
-        // Map index to RAS coordinate
-        auto idx = itDotsSrc2.GetIndex();
-        itk::Point<double, 3> pt;
-        dots->TransformIndexToPhysicalPoint(idx, pt);
-        pt[0] *= -1.0; pt[1] *= -1.0;
-
-        // Set coordinate array
-        for(unsigned int d = 0; d < 3; d++)
-          m_DotsX(kDots,d) = pt[d];
-
-        kDots++;
-        }
-      }
   }
 
   /** Set up optimization for specific number of cut planes */
@@ -512,32 +496,14 @@ public:
 
     // Get the global orientation
     double phi = x[0];
-    double cos_phi = cos(phi), sin_phi = sin(phi);
 
     *m_SOut << "==== ITERATION " << setw(3) << ++m_Iter << " ====" << endl;
     *m_SOut << "  Parameters: " << vnl_vector<double>(x, m_NumUnknowns) << endl;
 
     // Apply cuts to the two graphs
     m_VGFull.ApplyCutPlanes(cpl);
-    m_VGEroded.ApplyCutPlanes(cpl);
-
-    // Keep track of minimum dots distance
-    double min_dots_distance = 1.0e100;
-
-    // Apply each plane to every vertex
-    for(unsigned int k = 0; k < cpl.size(); k++)
-      {
-      double cos_theta = cos(cpl[k].second);
-      double sin_theta = sin(cpl[k].second);
-      double r = cpl[k].first;
-
-      for(unsigned int q = 0; q < m_DotsX.rows(); q++)
-        {
-        double dd = fabs(m_DotsX[q][0] * cos_theta + m_DotsX[q][2] * sin_theta - r);
-        if(min_dots_distance > dd)
-          min_dots_distance = dd;
-        }
-      }
+    m_VGDots.ApplyCutPlanes(cpl);
+    m_VGAvoid.ApplyCutPlanes(cpl);
 
     // Now compute statistics for each cut (extents, volume, etc);
     m_VGFull.ComputeBlockExtentsAndSizes(cpl.size(), phi);
@@ -572,17 +538,24 @@ public:
 
     // Compute number of connected components
     int n_comp_full = m_VGFull.CountComponents();
-    int n_comp_eroded = m_VGEroded.CountComponents();
-    double penalty_conn = n_comp_full * 1.0 + n_comp_eroded * 1.0;
+    double penalty_conn = n_comp_full * 1.0;
 
     *m_SOut << "  Connected components in full graph: " << n_comp_full << endl;
-    *m_SOut << "  Connected components in eroded graph: " << n_comp_eroded << endl;
     *m_SOut << "  Connected components penalty: " << penalty_conn << endl;
 
     // Compute the minimum distance from dots to cut planes
+
+    // Apply each plane to every vertex
+    double min_dots_distance = m_VGDots.m_MinDistanceToCut;
+    double min_avoid_distance = m_VGAvoid.m_MinDistanceToCut;
+
     double dots_dist_penalty = (min_dots_distance < 5) ? 100 * (5 - min_dots_distance) : 0;
+    double avoid_dist_penalty = (min_avoid_distance < 5) ? 10 * (5 - min_avoid_distance) : 0;
+
     *m_SOut << "  Minimum distance from dots to cutplanes: " << min_dots_distance << endl;
     *m_SOut << "  Dots distance penalty: " << dots_dist_penalty << endl;
+    *m_SOut << "  Minimum distance from dots to avoidance regions: " << min_avoid_distance << endl;
+    *m_SOut << "  Avoidance distance penalty: " << avoid_dist_penalty << endl;
 
     // Compute the variance in volume
     double var_vol = (ssq_vol - sum_vol / n_vol) / n_vol;
@@ -591,7 +564,7 @@ public:
     *m_SOut << "  Volume variance penalty:" << std_vol << endl;
 
     // Total objective
-    double total_obj = penalty_extent + penalty_conn + dots_dist_penalty + var_vol;
+    double total_obj = penalty_extent + penalty_conn + dots_dist_penalty + avoid_dist_penalty + var_vol;
     *m_SOut << "  Total objective:" << total_obj << endl;
 
     return total_obj;
@@ -650,7 +623,7 @@ public:
 private:
 
   // Voxel graphs for the full image and eroded image
-  VoxelGraph m_VGFull, m_VGEroded;
+  VoxelGraph m_VGFull, m_VGDots, m_VGAvoid;
 
   // Matrix of xyz coordinates of the foreground voxels in the mask
   vnl_matrix<double> m_DotsX;
@@ -790,7 +763,7 @@ map<int, LabelStats> get_label_stats(ImageType *img)
 }
 
 void process_slab(Parameters &param, int slab_id, Slab &slab,
-                  ImageType *i_hemi_raw, ImageType *i_hemi_mask, ImageType *i_dots)
+                  ImageType *i_hemi_raw, ImageType *i_hemi_mask, ImageType *i_dots, ImageType *i_avoid)
 {
   // C3D output should be piped to a log file
   ofstream c3d_log(get_output_filename(param, SLAB_C3D_LOG, slab_id).c_str());
@@ -829,7 +802,13 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
   api.AddImage("dots", i_dots);
   api.Execute(
         "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
-        "-insert slab 1 -int 0 -reslice-identity -as dots_slab -o /tmp/dots_slab.nii.gz");
+        "-insert slab 1 -int 0 -reslice-identity -as dots_slab");
+
+  // Extract the slab from the avoidance image as well
+  api.AddImage("avoid", i_avoid);
+  api.Execute(
+        "-clear -push avoid -cmp -pick 1 -thresh %f %f 1 0 -push avoid -times "
+        "-insert slab 1 -int 0 -reslice-identity -as avoid_slab");
 
   // Cut plane list
   CutPlaneList cpl;
@@ -839,7 +818,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
   ofstream opt_log(fn_opt_log.c_str());
 
   // Set up the optimizer
-  SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab"), api.GetImage("slab_trim"), api.GetImage("dots_slab"));
+  SlabCutPlaneBruteOptimization scp_opt(api.GetImage("slab"), api.GetImage("dots_slab"), api.GetImage("avoid_slab"));
   if(scp_opt.GetNumberOfComponentsInSlab() == 0)
     {
     cout << "  No components in slab, skipping mold generation" << endl;
@@ -1042,6 +1021,19 @@ int main(int argc, char *argv[])
       {
       param.id_string = argv[++i];
       }
+    else if(arg == "-h" && n_trail > 0)
+      {
+      string side = argv[++i];
+      if (side == "L" || side == "l")
+        param.side = 'L';
+      else if (side == "R" || side == "r")
+        param.side = 'R';
+      else
+        {
+        printf("Side must be L or R\n");
+        return -1;
+        }
+      }
     else if(arg == "-i" && n_trail > 1)
       {
       param.fn_input_mri = argv[++i];
@@ -1050,6 +1042,10 @@ int main(int argc, char *argv[])
     else if(arg == "-d")
       {
       param.fn_input_dots = argv[++i];
+      }
+    else if(arg == "-a")
+      {
+      param.fn_input_avoidance = argv[++i];
       }
     else if(arg == "-o" && n_trail > 0)
       {
@@ -1063,7 +1059,6 @@ int main(int argc, char *argv[])
       {
       param.selected_slab = atoi(argv[++i]);
       }
-
     else 
       {
       printf("Command %s is unknown or too few parameters provided\n", argv[i]);
@@ -1081,15 +1076,26 @@ int main(int argc, char *argv[])
     ConvertAPIType api;
     api.RedirectOutput(c3d_log, c3d_log);
 
-    // Read the mask image and dots (avoidance) image
+    // Read the mask image and dots, avoidance images
     api.Execute("-verbose %s -popas mask", param.fn_input_seg.c_str());
+
     if(param.fn_input_dots.size())
       api.Execute("%s -swapdim LPI -popas dots", param.fn_input_dots.c_str());
     else
       api.Execute("-push mask -scale 0 -swapdim LPI -popas dots");
 
+    if(param.fn_input_avoidance.size())
+      api.Execute("%s -swapdim LPI -popas avoid", param.fn_input_avoidance.c_str());
+    else
+      api.Execute("-push mask -scale 0 -swapdim LPI -popas avoid");
+
     ImagePointer i_mask = api.GetImage("mask");
     ImagePointer i_dots = api.GetImage("dots");
+    ImagePointer i_avoid = api.GetImage("avoid");
+
+    // The trim amount should be at least equal to floor thickness and wall thickness
+    double trim_radius = std::max(param.mold_wall_thickness_mm,
+                                  std::max(param.mold_floor_thickness_mm, 5.));
 
     // The first thing is to reorient the image, upsample to desired resolution, 
     // and extract the largest connected component
@@ -1105,10 +1111,10 @@ int main(int argc, char *argv[])
     api.Execute(
           "-push mask -swapdim LPI -thresh 1 1 1 0 -as comp_raw "
           "-dilate 1 %dx%dx%d -dilate 0 %dx%dx%d -as comp "
-          "-trim 5mm -resample-mm %fmm -as H ",
+          "-trim %fmm -resample-mm %fmm -as H ",
           param.preproc_dilation, param.preproc_dilation, param.preproc_dilation,
           param.preproc_erosion, param.preproc_erosion, param.preproc_erosion,
-          param.mold_resolution_mm);
+          trim_radius, param.mold_resolution_mm);
 
     // The image H is the trimmed and resampled hemisphere. We will need its dimensions
     // for subsequent work
@@ -1116,8 +1122,17 @@ int main(int argc, char *argv[])
     ImageType *i_comp_resampled = api.GetImage("H");
     auto sz = i_comp_resampled->GetBufferedRegion().GetSize();
     auto sp = i_comp_resampled->GetSpacing();
-    double off_y = sz[1]*sp[1]/2 - 5;
-    double off_x = sz[0]*sp[0]/2 - 5;
+    auto org = i_comp_resampled->GetOrigin();
+
+    // The length of the brain that will be slabbed
+    double len_y = sz[1]*sp[1] - 2 * trim_radius;
+    double off_y = (sz[1]*sp[1]/2 - 5);
+    double off_x = 5;
+
+    // Things that depend on hemisphere side are the direction of extrusion and
+    // where we start the base
+    const char *ext_dir_1 = param.side == 'R' ? "RPS" : "LPS";
+    const char *ext_dir_2 = param.side == 'R' ? "LPS" : "RPS";
 
     // Compute the slab positions (TODO: optimize)
     itk::ContinuousIndex<double, 3> idxCenter;
@@ -1139,8 +1154,6 @@ int main(int argc, char *argv[])
       slabs[i].y1 = slabs[i].y0 + param.slit_spacing_mm;
       }
 
-
-
     // The next step is printing the main mold, which user may omit
     if(param.flag_print_hemisphere_mold)
       {
@@ -1161,23 +1174,38 @@ int main(int argc, char *argv[])
         }
       api.Execute("-as res1 -o /tmp/res1.nii.gz");
 
+      // The next step is to create the base. The base should begin mold_floor_thickness
+      // away from the hemisphere segmentation. Here, compute offset in voxels
+      double floor_offset_vox = (trim_radius - param.mold_floor_thickness_mm) / param.mold_resolution_mm;
+
+      // Create a solid base
+      api.Execute(
+            "-clear -push H -swapdim %s -cmv -pick 0 "
+            "-stretch %f %f 4 -4 -clip -4 4 -swapdim LPI -as base",
+            ext_dir_1, floor_offset_vox - 1.0, floor_offset_vox + 1.0);
+
+      // Create solid ends around the center
+      api.Execute("-clear -push H -push base -push res1 -max "
+                  "-copy-transform -pad 5x5x5 5x5x5 -4 -as mold -o /tmp/mold.nii.gz ");
+      /*
       api.Execute(
         "-push x -info -thresh %f inf 4 -4 -max "
         "-push y -info -thresh %f %f -4 4 -max "
         "-insert H 1 -copy-transform "
         "-pad 5x5x5 5x5x5 -4 -as mold ",
         off_x, y_center-off_y, y_center+off_y);
+        */
 
       // Extrude the brain image and trim extra plastic
       int p3 = (int) ceil(param.mold_wall_thickness_mm / param.mold_resolution_mm);
       api.Execute(
         "-clear -push comp -thresh -inf 0.5 4 -4 "
-        "-swapdim RPS -extrude-seg -swapdim LPI -dup "
-        "-swapdim LAS -extrude-seg "
+        "-swapdim %s -extrude-seg -swapdim LPI -dup "
+        "-swapdim %s -extrude-seg "
         "-thresh -inf 0 0 1 -dilate 0 0x%dx%d -stretch 0 1 4 -4 -swapdim LPI -min "
         "-insert mold 1 -background 4 -reslice-identity "
         "-push mold -min -as carved "
-        "-thresh 0 inf 1 0 -o /tmp/b.nii.gz", p3, p3);
+        "-thresh 0 inf 1 0 -o /tmp/b.nii.gz", ext_dir_1, ext_dir_2, p3, p3);
 
       // Get the connected component image and mold
       ImagePointer i_comp = api.GetImage("comp");
@@ -1196,7 +1224,7 @@ int main(int argc, char *argv[])
       if(param.selected_slab < 0 || param.selected_slab == i)
         {
         cout << "Generating mold for slab " << i << " of " << n_slabs << endl;
-        process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots);
+        process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots, i_avoid);
         }
       }
 
