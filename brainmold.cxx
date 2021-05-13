@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cmath>
 #include <queue>
+#include <cstring>
 
 #include <itkImage.h>
 #include <itkImageFileReader.h>
@@ -50,6 +51,7 @@ public:
 
   // Flags
   bool flag_print_hemisphere_mold = true;
+  bool flag_no_cuts = false;
 
   // Specific slab to analyze
   int selected_slab = -1;
@@ -63,6 +65,7 @@ enum OutputKind {
   HEMI_C3D_LOG,
   SLAB_MOLD_IMAGE,
   SLAB_VOLUME_IMAGE,
+  SLAB_WITH_DOTS_VOLUME_IMAGE,
   SLAB_C3D_LOG,
   SLAB_OPTIMIZATION_LOG,
   SLAB_CUTPLANE_JSON,
@@ -111,6 +114,9 @@ string get_output_filename(Parameters &param, OutputKind type, int slab = -1)
     case SLAB_CUT_TEXLET:
       sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
       break;
+    case SLAB_WITH_DOTS_VOLUME_IMAGE:
+      sprintf(fn_out, "%s/%s_slab%02d_mask_with_dots.nii.gz", root, id, slab);
+      break;
     case GLOBAL_TEXFILE:
       sprintf(fn_out, "%s/tex/%s_print_template.tex", root, id);
       break;
@@ -150,6 +156,7 @@ int usage()
     "optional inputs:\n"
     "  -d <image>               Dots segmentation image\n"
     "  -a <image>               Avoidance segmentation image\n"
+    "  -C                       No cuts/molds for the slabs (new way)\n"
     "  --no-hemi-mold           Skip hemisphere mold printing\n"
     "  --slab <index>           Only generate for one slab (negative for none)\n"
     );
@@ -762,6 +769,41 @@ map<int, LabelStats> get_label_stats(ImageType *img)
   return stats;
 }
 
+/**
+ * Simplified version of this code where we just output slabs with dots and generate the
+ * PDF in Python
+ */
+void process_slab_nocuts(
+    Parameters &param, int slab_id, Slab &slab,
+    ImageType *i_hemi_raw, ImageType *i_hemi_mask, ImageType *i_dots, ImageType *i_avoid)
+{
+  // C3D output should be piped to a log file
+  ofstream c3d_log(get_output_filename(param, SLAB_C3D_LOG, slab_id).c_str());
+
+  // Create our own API
+  ConvertAPIType api;
+  api.RedirectOutput(c3d_log, c3d_log);
+
+  // Deal with the raw image (for visualization)
+  api.AddImage("H", i_hemi_mask);
+
+  // Extract the slab image region
+  api.Execute(
+        "-clear -push H -cmp -pick 1 -thresh %f %f 255 0 "
+        "-push H -times -thresh 0 127 0 255  -trim 0vox -as slab ",
+        slab.y0, slab.y1);
+
+  // Extract the slab from the dots image as well
+  // Add the two images together and export as the slab image. This is all that
+  // is really needed, the rest can be done in Numpy
+  api.AddImage("dots", i_dots);
+  api.Execute(
+        "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
+        "-insert slab 1 -int 0 -reslice-identity -as dots_slab "
+        "-push slab -add -type uchar -o %s",
+        get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
+}
+
 void process_slab(Parameters &param, int slab_id, Slab &slab,
                   ImageType *i_hemi_raw, ImageType *i_hemi_mask, ImageType *i_dots, ImageType *i_avoid)
 {
@@ -919,7 +961,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
         "-foreach -thresh 0 0 1 0 -swapdim PRS -extrude-seg -swapdim ARS -extrude-seg -swapdim LPI -thresh 0 0 1 0 -endfor "
         "-scale 0.1 -merge -int 0 -insert F 1 -background 255 -reslice-identity -push F -replace 1 255 -min "
         "-dup -push dots_slab -thresh 0 0 1 0 -swapdim PRS -extrude-seg -swapdim ARS -extrude-seg -swapdim LPI "
-        "-thresh 0 0 0 255 -background 0 -reslice-identity -as dd -min -push dd -thresh 255 255 0 128 -add "
+        "-thresh 0 0 0 255 -background 0 -reslice-identity -as dd -min -push dd -thresh 255 255 1 0 -dilate 0 2x0x2 -times "
         "-slice y 50%% -as png_slice -clear");
 
   // Generate replace commands for R/G/B (like -oli but with in-memory palette)
@@ -1005,7 +1047,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
 
 int main(int argc, char *argv[])
 {
-  itk::MultiThreader::SetGlobalDefaultNumberOfThreads(1);
+  itk::MultiThreaderBase::SetGlobalDefaultNumberOfThreads(1);
 
   if(argc < 2)
     return usage();
@@ -1042,6 +1084,10 @@ int main(int argc, char *argv[])
     else if(arg == "-d")
       {
       param.fn_input_dots = argv[++i];
+      }
+    else if(arg == "-C")
+      {
+      param.flag_no_cuts = true;
       }
     else if(arg == "-a")
       {
@@ -1148,10 +1194,13 @@ int main(int argc, char *argv[])
 
     // Create the slabs
     std::vector<Slab> slabs(n_slabs);
+
+    // The slabs should go from anterior to posterior, so from increasing y
+    // coordinate to decreasing y coordinate
     for(int i = 0; i < n_slabs; i++)
       {
-      slabs[i].y0 = y_center + (i - n_slabs/2.) * param.slit_spacing_mm;
-      slabs[i].y1 = slabs[i].y0 + param.slit_spacing_mm;
+      slabs[i].y1 = y_center + (n_slabs/2. - i) * param.slit_spacing_mm;
+      slabs[i].y0 = slabs[i].y1 - param.slit_spacing_mm;
       }
 
     // The next step is printing the main mold, which user may omit
@@ -1224,7 +1273,10 @@ int main(int argc, char *argv[])
       if(param.selected_slab < 0 || param.selected_slab == i)
         {
         cout << "Generating mold for slab " << i << " of " << n_slabs << endl;
-        process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots, i_avoid);
+        if(param.flag_no_cuts)
+          process_slab_nocuts(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots, i_avoid);
+        else
+          process_slab(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots, i_avoid);
         }
       }
 
