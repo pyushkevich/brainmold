@@ -800,7 +800,8 @@ void process_slab_nocuts(
   api.Execute(
         "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
         "-insert slab 1 -int 0 -reslice-identity -as dots_slab "
-        "-push slab -add -type uchar -o %s",
+        "-push slab -push dots_slab -thresh 0 0 1 0 -times "
+        "-push dots_slab -add -type uchar -o %s",
         get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
 }
 
@@ -988,7 +989,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
     {
     auto &ctr = it.second.center_of_mass;
     int label = get_block_label(ctr[0], ctr[2], cpl);
-    cout << "Dot " << it.first << " Center " << ctr << " Label " << label << endl;
+    cout << "Dot " << it.second.label << " Center " << ctr << " Label " << label << endl;
     }
 
   // Generate the tex file
@@ -1030,7 +1031,7 @@ void process_slab(Parameters &param, int slab_id, Slab &slab,
       if(label == it.first)
         {
         fprintf(ftex, "    \\small Dot %d at depth $%4.2f$mm of $%4.2f$mm \\newline \n",
-                itd.first, ctr[1] - slab.y0, slab.y1 - slab.y0);
+                itd.second.label, ctr[1] - slab.y0, slab.y1 - slab.y0);
         }
       }
 
