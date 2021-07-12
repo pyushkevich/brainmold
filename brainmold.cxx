@@ -789,9 +789,16 @@ void process_slab_nocuts(
 
   // Extract the slab image region
   api.Execute(
-        "-clear -push H -cmp -pick 1 -thresh %f %f 255 0 "
-        "-push H -times -thresh 0 127 0 255  -trim 0vox -as slab ",
+        "-verbose -clear -push H -cmp -pick 1 -thresh %f %f 255 0 "
+        "-push H -times -thresh 0 127 0 255 -info -trim 0vox -as slab ",
         slab.y0, slab.y1);
+
+  // Check if the image is empty
+  if(api.GetImage("slab")->GetBufferedRegion().GetNumberOfPixels() == 0)
+    {
+    cout << "  Empty slab encountered" << endl;
+    return;
+    }
 
   // Extract the slab from the dots image as well
   // Add the two images together and export as the slab image. This is all that
@@ -801,7 +808,7 @@ void process_slab_nocuts(
         "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
         "-insert slab 1 -int 0 -reslice-identity -as dots_slab "
         "-push slab -push dots_slab -thresh 0 0 1 0 -times "
-        "-push dots_slab -add -type uchar -o %s",
+        "-push dots_slab -add -type uchar -info-full -o %s",
         get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
 }
 
@@ -1274,6 +1281,7 @@ int main(int argc, char *argv[])
       if(param.selected_slab < 0 || param.selected_slab == i)
         {
         cout << "Generating mold for slab " << i << " of " << n_slabs << endl;
+        cout << "  Y range: " << slabs[i].y0 << ", " << slabs[i].y1 << endl;
         if(param.flag_no_cuts)
           process_slab_nocuts(param, i, slabs[i], i_comp_raw, i_comp_resampled, i_dots, i_avoid);
         else
