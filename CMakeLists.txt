@@ -13,6 +13,7 @@ include(${ITK_USE_FILE})
 
 # Find C3D and include needed stuff
 find_package(Convert3D REQUIRED)
+message(STATUS "dirs are ${Convert3D_INCLUDE_DIRS}")
 include_directories(${Convert3D_INCLUDE_DIRS})
 
 # Add the executable

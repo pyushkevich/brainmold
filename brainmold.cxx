@@ -805,10 +805,11 @@ void process_slab_nocuts(
   // is really needed, the rest can be done in Numpy
   api.AddImage("dots", i_dots);
   api.Execute(
-        "-clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
-        "-insert slab 1 -int 0 -reslice-identity -as dots_slab "
+        "-verbose -clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
+        "-insert slab 1 -int 0 -foreach -info -endfor -reslice-identity -as dots_slab "
         "-push slab -push dots_slab -thresh 0 0 1 0 -times "
         "-push dots_slab -add -type uchar -info-full -o %s",
+	slab.y0, slab.y1,
         get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
 }
 
@@ -1134,6 +1135,8 @@ int main(int argc, char *argv[])
     api.Execute("-verbose %s -popas mask", param.fn_input_seg.c_str());
 
     if(param.fn_input_dots.size())
+      // TODO: if we want to widen the dots to 3x3x3, add this code instead:
+      // "%s -swapdim LPI -verbose -dup -scale 0 -popas ref -replace 0 255 -split -popas BG -foreach -dilate 1 1x1x1 -trim-to-size 3x3x3vox -info -insert ref 1 -reslice-identity -endfor -push BG -merge -replace 255 0 -popas dots"
       api.Execute("%s -swapdim LPI -popas dots", param.fn_input_dots.c_str());
     else
       api.Execute("-push mask -scale 0 -swapdim LPI -popas dots");
