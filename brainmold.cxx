@@ -94,40 +94,40 @@ string get_output_filename(Parameters &param, OutputKind type, int slab = -1)
   switch(type)
   {
     case HEMI_MOLD_IMAGE:
-      sprintf(fn_out, "%s/%s_hemi_mold.nii.gz", root, id);
+      snprintf(fn_out, 4096, "%s/%s_hemi_mold.nii.gz", root, id);
       break;
     case HEMI_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_hemi_volume.nii.gz", root, id);
+      snprintf(fn_out, 4096, "%s/%s_hemi_volume.nii.gz", root, id);
       break;
     case HEMI_C3D_LOG:
-      sprintf(fn_out, "%s/logs/%s_hemi_c3d_log.txt", root, id);
+      snprintf(fn_out, 4096, "%s/logs/%s_hemi_c3d_log.txt", root, id);
       break;
     case SLAB_MOLD_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_mold.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_mold.nii.gz", root, id, slab);
       break;
     case SLAB_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_volume.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_volume.nii.gz", root, id, slab);
       break;
     case SLAB_C3D_LOG:
-      sprintf(fn_out, "%s/logs/%s_slab%02d_c3d_log.txt", root, id, slab);
+      snprintf(fn_out, 4096, "%s/logs/%s_slab%02d_c3d_log.txt", root, id, slab);
       break;
     case SLAB_OPTIMIZATION_LOG:
-      sprintf(fn_out, "%s/logs/%s_slab%02d_opt_log.txt", root, id, slab);
+      snprintf(fn_out, 4096, "%s/logs/%s_slab%02d_opt_log.txt", root, id, slab);
       break;
     case SLAB_CUTPLANE_JSON:
-      sprintf(fn_out, "%s/%s_slab%02d_cutplanes.json", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_cutplanes.json", root, id, slab);
       break;
     case SLAB_CUT_PNG:
-      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.png", root, id, slab);
+      snprintf(fn_out, 4096, "%s/tex/%s_slab%02d_cuts.png", root, id, slab);
       break;
     case SLAB_CUT_TEXLET:
-      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
+      snprintf(fn_out, 4096, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
       break;
     case SLAB_WITH_DOTS_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_mask_with_dots.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_mask_with_dots.nii.gz", root, id, slab);
       break;
     case GLOBAL_TEXFILE:
-      sprintf(fn_out, "%s/tex/%s_print_template.tex", root, id);
+      snprintf(fn_out, 4096, "%s/tex/%s_print_template.tex", root, id);
       break;
   }
 
@@ -537,7 +537,7 @@ public:
         double ext_min = min(w, h), ext_max = max(w, h);
 
         char buffer[256];
-        sprintf(buffer, "  Piece %d:  Extent: %4.2f by %4.2f  Rel.Size = %6.4f",
+        snprintf(buffer, 256, "  Piece %d:  Extent: %4.2f by %4.2f  Rel.Size = %6.4f",
                 l, ext_max, ext_min, m_VGFull.m_BlockRelativeSizes[l]);
         *m_SOut << buffer<< endl;
 
@@ -840,7 +840,8 @@ void process_slab_nocuts(
     // Create a region around the center - a bit larger and inside of the slab
     itk::ImageRegion<3> dot_region(idx_center, {1u,1u,1u});
     dot_region.PadByRadius(1);
-    dot_region.Crop(i_slab->GetBufferedRegion());
+    if(!dot_region.Crop(i_slab->GetBufferedRegion()))
+      continue;
 
     // Fill the region with this dot
     if(dot_region.GetNumberOfPixels() > 0)
