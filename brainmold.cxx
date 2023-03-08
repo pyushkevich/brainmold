@@ -803,23 +803,62 @@ void process_slab_nocuts(
         slab.y0, slab.y1);
 
   // Check if the image is empty
-  if(api.GetImage("slab")->GetBufferedRegion().GetNumberOfPixels() == 0)
+  auto *i_slab = api.GetImage("slab");
+  if(i_slab->GetBufferedRegion().GetNumberOfPixels() == 0)
     {
     cout << "  Empty slab encountered" << endl;
     return;
     }
 
-  // Extract the slab from the dots image as well
-  // Add the two images together and export as the slab image. This is all that
-  // is really needed, the rest can be done in Numpy
-  api.AddImage("dots", i_dots);
-  api.Execute(
-        "-verbose -clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
-        "-insert slab 1 -int 0 -foreach -info -endfor -reslice-identity -as dots_slab "
-        "-push slab -push dots_slab -thresh 0 0 1 0 -times "
-        "-push dots_slab -add -type uchar -info-full -o %s",
-	slab.y0, slab.y1,
-        get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
+  // Get all the dots and render them in the slab space
+  struct DotStat { int count = 0; itk::Point<double, 3> p; };
+  std::map<int, DotStat > dot_stats;
+  itk::ImageRegionIteratorWithIndex<ImageType> itd(i_dots, i_dots->GetBufferedRegion());
+  for(; !itd.IsAtEnd(); ++itd)
+    {
+    if(itd.Value() != 0)
+      {
+      itk::Point<double, 3> p;
+      i_dots->TransformIndexToPhysicalPoint(itd.GetIndex(), p);
+      dot_stats[itd.Value()].count++;
+      for(unsigned int j = 0; j < 3; j++)
+        dot_stats[itd.Value()].p[j] += p[j];
+      }
+    }
+
+  // Render each dot into the slab
+  for(auto &it : dot_stats)
+    {
+    // Find the center of the dot
+    for(unsigned int j = 0; j < 3; j++)
+      it.second.p[j] = it.second.p[j] / it.second.count;
+
+    // Project into the space of the slab image
+    itk::Index<3> idx_center;
+    i_slab->TransformPhysicalPointToIndex(it.second.p, idx_center);
+
+    // Create a region around the center - a bit larger and inside of the slab
+    itk::ImageRegion<3> dot_region(idx_center, {1u,1u,1u});
+    dot_region.PadByRadius(1);
+    dot_region.Crop(i_slab->GetBufferedRegion());
+
+    // Fill the region with this dot
+    if(dot_region.GetNumberOfPixels() > 0)
+      {
+      printf("Slab %d contains dot %d with physical coordinates (%8.4f, %8.4f, %8.4f)\n",
+             slab_id, it.first, it.second.p[0], it.second.p[1], it.second.p[2]);
+      }
+    for(itk::ImageRegionIterator<ImageType> itdot(i_slab, dot_region);
+        !itdot.IsAtEnd(); ++itdot)
+      {
+      itdot.Set(it.first);
+      }
+    }
+
+  // Save the image
+  api.Execute("-push slab -type uchar -o %s",
+              get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
+
 }
 
 void process_slab(Parameters &param, int slab_id, Slab &slab,
