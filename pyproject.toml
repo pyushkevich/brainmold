@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "picsl_brainmold"
+version = "0.0.1"
+authors = [
+  { name="Paul Yushkevich", email="pyushkevich@gmail.com" },
+]
+description = "BrainMold: Package for 3D printing cutting molds for ex vivo MRI"
+dependencies = [
+  'picsl_c3d>=1.4.2.1',
+]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Medical Science Apps."
+]
+
+[project.urls]
+Homepage = "https://github.com/pyushkevich/brainmold"

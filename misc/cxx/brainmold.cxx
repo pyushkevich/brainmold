@@ -803,7 +803,7 @@ void process_slab_nocuts(
         slab.y0, slab.y1);
 
   // Check if the image is empty
-  auto *i_slab = api.GetImage("slab");
+  auto i_slab = api.GetImage("slab");
   if(i_slab->GetBufferedRegion().GetNumberOfPixels() == 0)
     {
     cout << "  Empty slab encountered" << endl;

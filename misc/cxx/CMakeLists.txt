@@ -17,7 +17,8 @@ message(STATUS "dirs are ${Convert3D_INCLUDE_DIRS}")
 include_directories(${Convert3D_INCLUDE_DIRS})
 
 # Add the executable
-add_executable(brainmold brainmold.cxx)
+add_executable(brainmold brainmold.cxx
+  bm.py)
 target_link_libraries(brainmold ${ITK_LIBRARIES} ${Convert3D_LIBRARIES})
 
 
