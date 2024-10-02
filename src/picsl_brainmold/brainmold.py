@@ -113,11 +113,11 @@ def make_mold(param:Parameters):
 
     r_dil, r_ero = param.preproc_dilation, param.preproc_erosion
     api.execute(f"-push mask -swapdim LPI -thresh 1 1 1 0 -as comp_raw "
-                f"-dilate 1 {r_dil}x{r_dil}x{r_dil} -dilate 0 {r_ero}x{r_ero}x{r_ero} "
+                f"-dilate 1 {r_dil}x{r_dil}x{r_dil} -dilate 0 {r_ero}x{r_ero}x{r_ero} -as comp "
                 f"-trim {trim_radius}mm -resample-mm {param.mold_resolution_mm}mm -as H")
 
     # Extract image details
-    i_comp_resampled = api.get_image("H")
+    i_comp_resampled = api.peek(-1)
     sz = i_comp_resampled.GetSize()
     sp = i_comp_resampled.GetSpacing()
     off_y = (sz[1] * sp[1] / 2 - 5)
@@ -169,40 +169,37 @@ def make_mold(param:Parameters):
         api.execute(f"-push carved -o {param.fn_hemi_mold_image()}")
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="brainmold: Generator for 3D printed brain molds")
+class BrainMoldLauncher:
+    
+    def __init__(self, parser):
+        
+        # Required arguments
+        parser.add_argument("--subject", "-s", required=True, help="Subject ID, used in naming files")
+        parser.add_argument("--hemisphere", "-H", choices=["L", "R"], required=True, help="Which hemisphere (left or right)")
+        parser.add_argument("--input", "-i", nargs=2, required=True, metavar=('mri', 'mask'), help="Input MRI and brain mask")
+        parser.add_argument("--output", "-o", required=True, help="Output directory")
 
-    # Required arguments
-    parser.add_argument("--subject", "-s", required=True, help="Subject ID, used in naming files")
-    parser.add_argument("--hemisphere", "-h", choices=["L", "R"], required=True, help="Which hemisphere (left or right)")
-    parser.add_argument("--input", "-i", nargs=2, required=True, metavar=('mri', 'mask'), help="Input MRI and brain mask")
-    parser.add_argument("--output", "-o", required=True, help="Output directory")
-
-    # Optional arguments
-    parser.add_argument("--dots", "-d", help="Dots segmentation image")
-    parser.add_argument("--avoidance", "-a", help="Avoidance segmentation image")
-    parser.add_argument("--no-hemi-mold", action="store_true", help="Skip hemisphere mold printing")
-    parser.add_argument("--slab", type=int, default=-1, help="Only generate for one slab (negative for none)")
-
-    args = parser.parse_args()
-
-    param = Parameters()
-
-    # Set the parameters from arguments
-    param.id_string = args.subject
-    param.side = args.hemisphere
-    param.fn_input_mri = args.input[0]
-    param.fn_input_seg = args.input[1]
-    param.fn_output_root = args.output
-    param.fn_input_dots = args.dots
-    param.fn_input_avoidance = args.avoidance
-    param.flag_print_hemisphere_mold = not args.no_hemi_mold
-    param.selected_slab = args.slab
-
-    return param
-
-
-if __name__ == "__main__":
-    param = parse_arguments()
-    make_mold(param)
+        # Optional arguments
+        parser.add_argument("--dots", "-d", help="Dots segmentation image")
+        parser.add_argument("--avoidance", "-a", help="Avoidance segmentation image")
+        parser.add_argument("--no-hemi-mold", action="store_true", help="Skip hemisphere mold printing")
+        parser.add_argument("--slab", type=int, default=-1, help="Only generate for one slab (negative for none)")
+        
+        parser.set_defaults(func = lambda args : self.run(args))
+        
+    def run(self, args):
+        
+        # Set the parameters from arguments
+        param = Parameters()
+        param.id_string = args.subject
+        param.side = args.hemisphere
+        param.fn_input_mri = args.input[0]
+        param.fn_input_seg = args.input[1]
+        param.fn_output_root = args.output
+        param.fn_input_dots = args.dots
+        param.fn_input_avoidance = args.avoidance
+        param.flag_print_hemisphere_mold = not args.no_hemi_mold
+        param.selected_slab = args.slab
+        
+        make_mold(param)
 
