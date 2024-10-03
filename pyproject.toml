@@ -10,7 +10,7 @@ authors = [
 ]
 description = "BrainMold: Package for 3D printing cutting molds for ex vivo MRI"
 dependencies = [
-  'picsl_c3d>=1.4.2.1',
+  'picsl_c3d>=1.4.2.2',
   'SimpleITK',
   'matplotlib',
   'numpy'

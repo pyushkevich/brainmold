@@ -1,5 +1,5 @@
 import argparse
-from picsl_brainmold.brainmold import BrainMoldLauncher
+from picsl_brainmold.brainmold import BrainMoldLauncher, SlabGeneratorLauncher
 from picsl_brainmold.slab_postproc import PaperTemplateLauncher
 
 # Create a parser
@@ -12,6 +12,9 @@ sub = parse.add_subparsers(dest='command', help='sub-command help', required=Tru
 # Add the CRASHS subparser commands
 c_bm = BrainMoldLauncher(
     sub.add_parser('mold', help='Generate a cutting mold for a hemisphere'))
+
+c_sg = SlabGeneratorLauncher(
+    sub.add_parser('slabs', help='Generate masks for individual slabs'))
 
 c_paper = PaperTemplateLauncher(
     sub.add_parser('paper', help='Generate a paper template for block cutting'))
