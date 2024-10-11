@@ -23,7 +23,7 @@ The `picsl_brainmold` tool provides three main commands to guide the user throug
 #### General Syntax
 
 ```bash
-picsl_brainmold <command> [options]
+python -m picsl_brainmold <command> [options]
 ```
 
 Where `<command>` is one of:
@@ -37,7 +37,7 @@ Where `<command>` is one of:
 Generates a cutting mold for one hemisphere of the brain.
 
 ```bash
-picsl_brainmold mold -s <subject_id> -H <hemisphere> -i <mri_file> <mask_file> -w <work_dir> [options]
+python -m picsl_brainmold mold -s <subject_id> -H <hemisphere> -i <mri_file> <mask_file> -w <work_dir> [options]
 ```
 
 Required options:
@@ -54,7 +54,7 @@ Optional options:
 Generates masks for individual slabs based on a dots segmentation image. It is recommended that all dots be placed on the same plane within each slab, using the dot guidance image.
 
 ```bash
-picsl_brainmold slabs -w <work_dir> -d <dots_image>
+python -m picsl_brainmold slabs -w <work_dir> -d <dots_image>
 ```
 
 Required options:
@@ -66,7 +66,7 @@ Required options:
 Generates a paper template for block cutting based on the generated slabs.
 
 ```bash
-picsl_brainmold paper -w <work_dir>
+python -m picsl_brainmold paper -w <work_dir>
 ```
 
 Required options:
@@ -79,19 +79,19 @@ Here’s an example workflow for processing a brain scan and generating the nece
 1. **Generate the brain mold:**
 
 ```bash
-picsl_brainmold mold -s subj001 -H L -i subj001_reslice.nii.gz subj001_hemisphere_mask.nii.gz -g 0.2 -w ./work
+python -m picsl_brainmold mold -s subj001 -H L -i subj001_reslice.nii.gz subj001_hemisphere_mask.nii.gz -g 0.2 -w ./work
 ```
 
 2. **Generate slab masks:**
 
 ```bash
-picsl_brainmold slabs -w ./work -d subj001_cortex_dots_final.nii.gz
+python -m picsl_brainmold slabs -w ./work -d subj001_cortex_dots_final.nii.gz
 ```
 
 3. **Generate a paper template:**
 
 ```bash
-picsl_brainmold paper -w ./work
+python -m picsl_brainmold paper -w ./work
 ```
 
 ## License
