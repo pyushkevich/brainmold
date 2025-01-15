@@ -159,7 +159,7 @@ def make_mold(id:str, side:str,
         print("Extracting hemisphere main connected component and resampling")
 
         r_dil, r_ero = param.preproc_dilation, param.preproc_erosion
-        api.execute(f"-push mask -swapdim LPI -thresh 1 1 1 0 -as comp_raw "
+        api.execute(f"-push mask -swapdim LPI -thresh 1 inf 1 0 -as comp_raw "
                     f"-dilate 1 {r_dil}x{r_dil}x{r_dil} -dilate 0 {r_ero}x{r_ero}x{r_ero} -as comp "
                     f"-trim {trim_radius}mm -resample-mm {param.mold_resolution_mm}mm -as H")
 
